@@ -6,3 +6,6 @@
 #
 
 CONFIG_ARM_VIRT=y
+
+# Add HelixBoard
+CONFIG_HELIX=y

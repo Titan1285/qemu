@@ -110,4 +110,8 @@ arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
 
 arm_common_ss.add(files('boot.c'))
 
+arm_common_ss.add(when: 'CONFIG_HELIX', if_true: files(
+  'helix_board.c'
+))
+
 hw_common_arch += {'arm': arm_common_ss}

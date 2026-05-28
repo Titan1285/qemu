@@ -37,6 +37,15 @@ config ARM_VIRT
     select ACPI_CXL
     select ACPI_HMAT
 
+config HELIX
+    bool
+    default y
+    depends on AARCH64
+    select ARM_GIC
+    select PFLASH_CFI01
+    select PL011
+    select PL031
+
 config CUBIEBOARD
     bool
     default y
