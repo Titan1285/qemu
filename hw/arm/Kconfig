@@ -45,6 +45,8 @@ config HELIX
     select PFLASH_CFI01
     select PL011
     select PL031
+    select SERIAL
+    select SDHCI
 
 config CUBIEBOARD
     bool
