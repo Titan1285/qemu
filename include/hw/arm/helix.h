@@ -9,6 +9,12 @@
 #include "qom/object.h"
 #include "hw/core/boards.h"
 #include "hw/arm/boot.h"
+#include "system/memory.h"
+#include "system/system.h"
+#include "qemu/typedefs.h"
+#include "system/address-spaces.h"
+#include "hw/char/pl011.h"
+#include "hw/core/sysbus.h"
 
 
 
@@ -17,6 +23,10 @@
 
 
 
+
+
+#define NUM_IRQS 256
+#define HELIX_GIC_SPI_BASE 32
 
 #define TYPE_HELIX_MACHINE MACHINE_TYPE_NAME("helix")
 OBJECT_DECLARE_SIMPLE_TYPE(HelixMachineState, HELIX_MACHINE)
@@ -25,20 +35,23 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixMachineState, HELIX_MACHINE)
 
 
 
-#define HELIX_ROM_BASE  0x00000000
-#define HELIX_ROM_SIZE  0x10000     // 64KB
+#define HELIX_ROM_BASE      0x00000000
+#define HELIX_ROM_SIZE      0x10000     // 64KB
 
-#define HELIX_SRAM_BASE 0x00010000
-#define HELIX_SRAM_SIZE 0x40000     // 256KB
+#define HELIX_SRAM_BASE     0x00030000
+#define HELIX_SRAM_SIZE     0x40000     // 256KB
 
-#define HELIX_UART_BASE 0x00050000
-#define HELIX_UART_SIZE 0x1000      // 4KB
+#define HELIX_UART_BASE     0x00070000
+#define HELIX_UART_SIZE     0x1000      // 4KB
 
-#define HELIX_EMMC_BASE 0x00051000
-#define HELIX_EMMC_SIZE 0x1000      // 4KB (TODO: Verify this...)
+#define HELIX_GICD_BASE     0x00071000
+#define HELIX_GICD_SIZE     0x10000     // 64KB
 
-#define HELIX_DRAM_BASE 0x40000000
-#define HELIX_DRAM_SIZE 0x20000000  // 512MB
+#define HELIX_GICR_BASE     0x00081000
+#define HELIX_GICR_SIZE     0x20000     // 128KB
+
+#define HELIX_DRAM_BASE     0x40000000
+#define HELIX_DRAM_SIZE     0x20000000  // 512MB
 
 
 
@@ -46,8 +59,17 @@ enum {
     HELIX_ROM   = 0,
     HELIX_SRAM  = 1,
     HELIX_UART0 = 2,
-    HELIX_EMMC  = 3,
-    HELIX_DRAM  = 4
+    HELIX_GICD  = 3,
+    HELIX_GICR  = 4,
+    HELIX_TIMER = 5,
+    HELIX_EMMC  = 6,
+    HELIX_DRAM  = 7
+};
+
+// IRQ's 16-32 for Private Peripheral IRQ's (like Generic Timer, etc), 32 - 1019 is for Shared Peripheral IRQ's (like UART, etc), 0 - 15 is for SGI's
+enum {
+    HELIX_UART_IRQ              = 32,
+    HELIX_SECURE_TIMER_PHYS_IRQ = 29
 };
 
 
@@ -56,7 +78,13 @@ typedef struct HelixMachineState {
     MachineState    parent;
     ARMCPU          *cpu;
     CPUState        *cs;
-    PFlashCFI01     *flash;
+    PFlashCFI01     *bootrom;
+
+    DeviceState     *gic;
+    SysBusDevice    *gic_bus;
+
+    DeviceState     *pl011;
+    SysBusDevice    *pl011_bus;
 
     MemoryRegion    *sysmem;        // Non-secure system memory
     MemoryRegion    *sec_sysmem;    // Secure system memory

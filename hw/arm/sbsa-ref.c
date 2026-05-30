@@ -491,28 +491,17 @@ static void create_gic(SBSAMachineState *sms, MemoryRegion *mem)
         };
 
         for (irq = 0; irq < ARRAY_SIZE(timer_irq); irq++) {
-            qdev_connect_gpio_out(cpudev, irq,
-                                  qdev_get_gpio_in(sms->gic,
-                                                   intidbase + timer_irq[irq]));
+            qdev_connect_gpio_out(cpudev, irq, qdev_get_gpio_in(sms->gic, intidbase + timer_irq[irq]));
         }
 
-        qdev_connect_gpio_out_named(cpudev, "gicv3-maintenance-interrupt", 0,
-                                    qdev_get_gpio_in(sms->gic,
-                                                     intidbase
-                                                     + ARCH_GIC_MAINT_IRQ));
+        qdev_connect_gpio_out_named(cpudev, "gicv3-maintenance-interrupt", 0, qdev_get_gpio_in(sms->gic, intidbase + ARCH_GIC_MAINT_IRQ));
 
-        qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0,
-                                    qdev_get_gpio_in(sms->gic,
-                                                     intidbase
-                                                     + VIRTUAL_PMU_IRQ));
+        qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0, qdev_get_gpio_in(sms->gic, intidbase + VIRTUAL_PMU_IRQ));
 
         sysbus_connect_irq(gicbusdev, i, qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
-        sysbus_connect_irq(gicbusdev, i + smp_cpus,
-                           qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
-        sysbus_connect_irq(gicbusdev, i + 2 * smp_cpus,
-                           qdev_get_gpio_in(cpudev, ARM_CPU_VIRQ));
-        sysbus_connect_irq(gicbusdev, i + 3 * smp_cpus,
-                           qdev_get_gpio_in(cpudev, ARM_CPU_VFIQ));
+        sysbus_connect_irq(gicbusdev, i + smp_cpus, qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
+        sysbus_connect_irq(gicbusdev, i + 2 * smp_cpus, qdev_get_gpio_in(cpudev, ARM_CPU_VIRQ));
+        sysbus_connect_irq(gicbusdev, i + 3 * smp_cpus, qdev_get_gpio_in(cpudev, ARM_CPU_VFIQ));
     }
     create_its(sms);
 }
