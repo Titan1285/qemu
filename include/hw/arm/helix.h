@@ -50,6 +50,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixMachineState, HELIX_MACHINE)
 #define HELIX_GICR_BASE     0x00081000
 #define HELIX_GICR_SIZE     0x20000     // 128KB
 
+#define HELIX_SDHCI_BASE    0x000A1000
+#define HELIX_SDHCI_SIZE    0x10000     // 64KB
+
 #define HELIX_DRAM_BASE     0x40000000
 #define HELIX_DRAM_SIZE     0x20000000  // 512MB
 
@@ -61,9 +64,8 @@ enum {
     HELIX_UART0 = 2,
     HELIX_GICD  = 3,
     HELIX_GICR  = 4,
-    HELIX_TIMER = 5,
-    HELIX_EMMC  = 6,
-    HELIX_DRAM  = 7
+    HELIX_EMMC  = 5,
+    HELIX_DRAM  = 6
 };
 
 // IRQ's 16-32 for Private Peripheral IRQ's (like Generic Timer, etc), 32 - 1019 is for Shared Peripheral IRQ's (like UART, etc), 0 - 15 is for SGI's
@@ -88,9 +90,6 @@ typedef struct HelixMachineState {
 
     MemoryRegion    *sysmem;        // Non-secure system memory
     MemoryRegion    *sec_sysmem;    // Secure system memory
-
-    char    *bootrom_path;
-    char    *emmc_path;
 } HelixMachineState;
 
 #endif

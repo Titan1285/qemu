@@ -24,6 +24,7 @@
 #include "target/arm/gtimer.h"
 #include "hw/arm/bsa.h"
 #include "hw/intc/arm_gic_common.h"
+#include "hw/sd/sdhci.h"
 
 
 
@@ -53,6 +54,7 @@ static const MemMapEntry helix_memmap[] = {
     [HELIX_UART0]   = {HELIX_UART_BASE, HELIX_UART_SIZE},
     [HELIX_GICD]    = {HELIX_GICD_BASE, HELIX_GICD_SIZE},
     [HELIX_GICR]    = {HELIX_GICR_BASE, HELIX_GICR_SIZE},
+    [HELIX_EMMC]    = {HELIX_SDHCI_BASE, HELIX_SDHCI_SIZE},
     [HELIX_DRAM]    = {HELIX_DRAM_BASE, HELIX_DRAM_SIZE}
 };
 
@@ -136,15 +138,14 @@ static void helix_uart_init(MachineState *ms) {
 
     sysbus_mmio_map(m->pl011_bus, 0, helix_memmap[HELIX_UART0].base);
 
-    uint32_t gic_spi_idx = HELIX_UART_IRQ - HELIX_GIC_SPI_BASE;
-    sysbus_connect_irq(m->pl011_bus, 0, qdev_get_gpio_in(DEVICE(m->gic), gic_spi_idx));
+    sysbus_connect_irq(m->pl011_bus, 0, qdev_get_gpio_in(DEVICE(m->gic), 32));
 }
 
 static void helix_cpu_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     Object *cpu_obj;
 
-    cpu_obj = object_new(ARM_CPU_TYPE_NAME("cortex-a53"));
+    cpu_obj = object_new(ARM_CPU_TYPE_NAME("cortex-a57"));
     m->cpu = ARM_CPU(cpu_obj);
 
     // CPU starts in 64-bit mode by default
@@ -189,6 +190,29 @@ static void helix_flash_init(MachineState *ms) {
     m->bootrom = PFLASH_CFI01(flash);
 }
 
+static void helix_sdhci_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+    DriveInfo *dinfo;
+    DeviceState *sdhci = qdev_new(TYPE_SYSBUS_SDHCI);
+
+
+    qdev_prop_set_uint8(sdhci, "sd-spec-version", 3);
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(sdhci), &error_fatal);
+
+    sysbus_mmio_map(SYS_BUS_DEVICE(sdhci), 0, helix_memmap[HELIX_EMMC].base);
+
+    // TODO: Figure out if IRQ works or not
+    sysbus_connect_irq(SYS_BUS_DEVICE(sdhci), 0, qdev_get_gpio_in(m->gic, 65));
+
+    dinfo = drive_get(IF_SD, 0, 0);
+
+    DeviceState *mmc = qdev_new(TYPE_SD_CARD);
+
+    qdev_prop_set_drive_err(mmc, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
+    qdev_realize_and_unref(mmc, qdev_get_child_bus(sdhci, "sd-bus"), &error_fatal);
+}
+
 static void helix_board_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
 
@@ -199,12 +223,17 @@ static void helix_board_init(MachineState *ms) {
     memory_region_init_ram(sram, NULL, "helix.sram", helix_memmap[HELIX_SRAM].size, &error_fatal);
     memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_SRAM].base, sram);
 
+    MemoryRegion *dram = g_new(MemoryRegion, 1);
+    memory_region_init_ram(dram, NULL, "helix.dram", helix_memmap[HELIX_DRAM].size, &error_fatal);
+    memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_DRAM].base, dram);
+
     // Initialize devices
     helix_cpu_init(ms);
     helix_gic_init(ms);
 
     helix_uart_init(ms);
     helix_flash_init(ms);
+    helix_sdhci_init(ms);
 }
 
 static void helix_board_class_init(ObjectClass *oc, const void *data) {
