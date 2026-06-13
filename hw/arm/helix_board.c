@@ -25,6 +25,8 @@
 #include "hw/arm/bsa.h"
 #include "hw/intc/arm_gic_common.h"
 #include "hw/sd/sdhci.h"
+#include "hw/sd/cadence_sdhci.h"
+
 
 
 
@@ -78,7 +80,7 @@ static void helix_gic_init(MachineState *ms) {
     qdev_prop_set_uint32(m->gic, "num-cpu", num_smp ? num_smp : 1);
 
     qdev_prop_set_uint32(m->gic, "num-irq", NUM_IRQS + 32);
-    qdev_prop_set_bit(m->gic, "has-security-extensions", true);
+    qdev_prop_set_bit(m->gic, "has-security-extensions", false);
 
     redist_capacity = helix_memmap[HELIX_GICR].size / GICV3_REDIST_SIZE;
     redist_count = MIN(num_smp ? num_smp : 1, redist_capacity);
@@ -192,25 +194,22 @@ static void helix_flash_init(MachineState *ms) {
 
 static void helix_sdhci_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
-    DriveInfo *dinfo;
-    DeviceState *sdhci = qdev_new(TYPE_SYSBUS_SDHCI);
+    DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
 
 
-    qdev_prop_set_uint8(sdhci, "sd-spec-version", 3);
 
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(sdhci), &error_fatal);
+    object_initialize_child(OBJECT(m), "sdhost", &m->sdhost, TYPE_CADENCE_SDHCI);
 
-    sysbus_mmio_map(SYS_BUS_DEVICE(sdhci), 0, helix_memmap[HELIX_EMMC].base);
+    sysbus_realize(SYS_BUS_DEVICE(&m->sdhost), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&m->sdhost), 0, helix_memmap[HELIX_EMMC].base);
 
-    // TODO: Figure out if IRQ works or not
-    sysbus_connect_irq(SYS_BUS_DEVICE(sdhci), 0, qdev_get_gpio_in(m->gic, 65));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&m->sdhost), 0, qdev_get_gpio_in(DEVICE(m->gic), 61));
 
-    dinfo = drive_get(IF_SD, 0, 0);
-
+    CadenceSDHCIState *sdhci = &(m->sdhost);
     DeviceState *mmc = qdev_new(TYPE_SD_CARD);
 
     qdev_prop_set_drive_err(mmc, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
-    qdev_realize_and_unref(mmc, qdev_get_child_bus(sdhci, "sd-bus"), &error_fatal);
+    qdev_realize_and_unref(mmc, sdhci->bus, &error_fatal);
 }
 
 static void helix_board_init(MachineState *ms) {

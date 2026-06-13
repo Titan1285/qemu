@@ -15,6 +15,8 @@
 #include "system/address-spaces.h"
 #include "hw/char/pl011.h"
 #include "hw/core/sysbus.h"
+#include "hw/sd/cadence_sdhci.h"
+
 
 
 
@@ -88,6 +90,9 @@ typedef struct HelixMachineState {
     DeviceState     *pl011;
     SysBusDevice    *pl011_bus;
 
+    CadenceSDHCIState   sdhost;
+    DeviceState         *plic;
+    
     MemoryRegion    *sysmem;        // Non-secure system memory
     MemoryRegion    *sec_sysmem;    // Secure system memory
 } HelixMachineState;

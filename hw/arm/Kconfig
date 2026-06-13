@@ -46,7 +46,7 @@ config HELIX
     select PL011
     select PL031
     select SERIAL
-    select SDHCI
+    select CADENCE_SDHCI
 
 config CUBIEBOARD
     bool
