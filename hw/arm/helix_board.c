@@ -26,7 +26,13 @@
 #include "hw/intc/arm_gic_common.h"
 #include "hw/sd/sdhci.h"
 #include "hw/sd/cadence_sdhci.h"
-
+#include "ui/console.h"
+#include "qapi/error.h"
+#include "ui/qemu-pixman.h"
+#include "hw/display/ramfb.h"
+#include "ui/console.h"
+#include "standard-headers/drm/drm_fourcc.h"
+#include "hw/display/framebuffer.h"
 
 
 
@@ -57,8 +63,11 @@ static const MemMapEntry helix_memmap[] = {
     [HELIX_GICD]    = {HELIX_GICD_BASE, HELIX_GICD_SIZE},
     [HELIX_GICR]    = {HELIX_GICR_BASE, HELIX_GICR_SIZE},
     [HELIX_EMMC]    = {HELIX_SDHCI_BASE, HELIX_SDHCI_SIZE},
-    [HELIX_DRAM]    = {HELIX_DRAM_BASE, HELIX_DRAM_SIZE}
+    [HELIX_FW_CFG]  = {HELIX_FW_CFG_BASE, HELIX_FW_CFG_SIZE},
+    [HELIX_DRAM]    = {HELIX_DRAM_BASE, HELIX_DRAM_SIZE},
+    [HELIX_FB]      = {HELIX_FRAMEBUFFER_BASE, HELIX_FRAMEBUFFER_SIZE}
 };
+
 
 
 
@@ -212,6 +221,32 @@ static void helix_sdhci_init(MachineState *ms) {
     qdev_realize_and_unref(mmc, sdhci->bus, &error_fatal);
 }
 
+static void helix_fw_cfg_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+    hwaddr fw_cfg_base = helix_memmap[HELIX_FW_CFG].base;
+
+
+
+    m->fw_cfg = fw_cfg_init_mem_dma(fw_cfg_base + 8, fw_cfg_base, 8, fw_cfg_base + 16, &address_space_memory);
+
+    if (!m->fw_cfg) {
+        error_report("Failed to initialize FW_CFG device!\n");
+        exit(-1);
+    }
+
+    // TODO: Verify if this is needed...?
+    rom_set_fw(m->fw_cfg);
+}
+
+static void helix_ramfb_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+
+    // Initialize framebuffer
+    MemoryRegion *fb = g_new(MemoryRegion, 1);
+    memory_region_init_ram(fb, NULL, "helix.ramfb", helix_memmap[HELIX_FB].size, &error_fatal);
+    memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_FB].base, fb);
+}
+
 static void helix_board_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
 
@@ -222,6 +257,7 @@ static void helix_board_init(MachineState *ms) {
     memory_region_init_ram(sram, NULL, "helix.sram", helix_memmap[HELIX_SRAM].size, &error_fatal);
     memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_SRAM].base, sram);
 
+    // Initialize DRAM
     MemoryRegion *dram = g_new(MemoryRegion, 1);
     memory_region_init_ram(dram, NULL, "helix.dram", helix_memmap[HELIX_DRAM].size, &error_fatal);
     memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_DRAM].base, dram);
@@ -229,7 +265,8 @@ static void helix_board_init(MachineState *ms) {
     // Initialize devices
     helix_cpu_init(ms);
     helix_gic_init(ms);
-
+    helix_fw_cfg_init(ms);
+    helix_ramfb_init(ms);
     helix_uart_init(ms);
     helix_flash_init(ms);
     helix_sdhci_init(ms);
@@ -241,12 +278,13 @@ static void helix_board_class_init(ObjectClass *oc, const void *data) {
     mc->desc = "Custom ARM64 Helix virtual board";
     mc->init = helix_board_init;
 
-    // Only one A53 CPU supported
+    // Only one A57 CPU supported
     mc->max_cpus = 1;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a57");
     
-    // 512MB default memory
-    mc->default_ram_size = HELIX_DEFAULT_DRAM_SIZE;
+    mc->default_ram_size = HELIX_DRAM_SIZE;
+
+    machine_class_allow_dynamic_sysbus_dev(mc, TYPE_RAMFB_DEVICE);
 }
 
 static void helix_board_instance_init(Object *obj) {
