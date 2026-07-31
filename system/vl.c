@@ -143,6 +143,7 @@
 #include "system/iothread.h"
 #include "qemu/guest-random.h"
 #include "qemu/keyval.h"
+#include "memory-internal.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 
@@ -1246,12 +1247,11 @@ static int fsdev_init_func(void *opaque, QemuOpts *opts, Error **errp)
 
 static int mon_init_func(void *opaque, QemuOpts *opts, Error **errp)
 {
-    return monitor_init_opts(opts, errp);
+    return monitor_new_opts(opts, errp);
 }
 
 static void monitor_parse(const char *str, const char *mode, bool pretty)
 {
-    static int monitor_device_index = 0;
     QemuOpts *opts;
     const char *p;
     char label[32];
@@ -1259,8 +1259,9 @@ static void monitor_parse(const char *str, const char *mode, bool pretty)
     if (strstart(str, "chardev:", &p)) {
         snprintf(label, sizeof(label), "%s", p);
     } else {
-        snprintf(label, sizeof(label), "compat_monitor%d",
-                 monitor_device_index);
+        g_autofree char *id = monitor_compat_id();
+        assert(strlen(id) < sizeof(label));
+        memcpy(label, id, strlen(id) + 1);
         opts = qemu_chr_parse_compat(label, str, true);
         if (!opts) {
             error_report("parse error: %s", str);
@@ -1276,7 +1277,6 @@ static void monitor_parse(const char *str, const char *mode, bool pretty)
     } else {
         assert(pretty == false);
     }
-    monitor_device_index++;
 }
 
 struct device_config {
@@ -1634,6 +1634,8 @@ static void qemu_unlink_pidfile(Notifier *n, void *data)
 
     upn = DO_UPCAST(struct UnlinkPidfileNotifier, notifier, n);
     unlink(upn->pid_file_realpath);
+    g_free(upn->pid_file_realpath);
+    upn->pid_file_realpath = NULL;
 }
 
 static const QEMUOption *lookup_opt(int argc, char **argv,
@@ -1827,6 +1829,10 @@ static void object_option_add_visitor(Visitor *v)
 {
     ObjectOption *opt = g_new0(ObjectOption, 1);
     visit_type_ObjectOptions(v, NULL, &opt->opts, &error_fatal);
+    if (opt->opts->qom_type == OBJECT_TYPE_MONITOR_HMP ||
+        opt->opts->qom_type == OBJECT_TYPE_MONITOR_QMP) {
+        default_monitor = 0;
+    }
     QTAILQ_INSERT_TAIL(&object_opts, opt, next);
 }
 
@@ -1968,7 +1974,9 @@ static bool object_create_early(const char *type)
 
     /* Reason: property "chardev" */
     if (g_str_equal(type, "rng-egd") ||
-        g_str_equal(type, "qtest")) {
+        g_str_equal(type, "qtest") ||
+        g_str_equal(type, "monitor-hmp") ||
+        g_str_equal(type, "monitor-qmp")) {
         return false;
     }
 
@@ -2215,7 +2223,7 @@ static void qemu_create_machine(QDict *qdict)
         }
     }
 
-    cpu_exec_init_all();
+    machine_memory_init();
 
     /*
      * Get the default machine options from the machine if it is not already
@@ -2672,6 +2680,7 @@ static void qemu_maybe_daemonize(const char *pid_file)
                 warn_report("not removing PID file on exit: cannot resolve PID "
                             "file path: %s: %s", pid_file, strerror(errno));
             }
+            g_free(pid_file_realpath);
             return;
         }
 
@@ -3230,6 +3239,8 @@ void qemu_init(int argc, char **argv)
                 default_monitor = 0;
                 break;
             case QEMU_OPTION_mon:
+                warn_report_once("'-mon' is deprecated, use '-object' with "
+                                 "'monitor-hmp' or 'monitor-qmp' types instead");
                 if (!qemu_opts_parse_noisily(qemu_find_opts("mon"), optarg,
                                              true)) {
                     exit(1);
@@ -3256,7 +3267,7 @@ void qemu_init(int argc, char **argv)
                 QemuOpts *fsdev;
                 QemuOpts *device;
                 const char *writeout, *sock_fd, *socket, *path, *security_model,
-                           *multidevs;
+                           *multidevs, *max_xattr_str;
 
                 olist = qemu_find_opts("virtfs");
                 if (!olist) {
@@ -3319,6 +3330,11 @@ void qemu_init(int argc, char **argv)
                 multidevs = qemu_opt_get(opts, "multidevs");
                 if (multidevs) {
                     qemu_opt_set(fsdev, "multidevs", multidevs, &error_abort);
+                }
+                max_xattr_str = qemu_opt_get(opts, "max_xattr");
+                if (max_xattr_str) {
+                    qemu_opt_set(fsdev, "max_xattr", max_xattr_str,
+                                 &error_abort);
                 }
                 device = qemu_opts_create(qemu_find_opts("device"), NULL, 0,
                                           &error_abort);

@@ -629,6 +629,18 @@ enum {
 #define UFS_MASK_UIC_COMMAND_RESULT 0xFF
 
 /*
+ * MIPI UniPro PHY Adapter (PA) layer attribute IDs accessed via
+ * DME_GET / DME_SET / DME_PEER_{GET,SET} UIC commands.
+ */
+#define UFS_ATTR_PA_AVAILTXDATALANES 0x1520
+#define UFS_ATTR_PA_AVAILRXDATALANES 0x1540
+#define UFS_ATTR_PA_CONNECTEDTXDATALANES 0x1561
+#define UFS_ATTR_PA_PWRMODE 0x1571
+#define UFS_ATTR_PA_CONNECTEDRXDATALANES 0x1581
+#define UFS_ATTR_PA_MAXRXPWMGEAR 0x1586
+#define UFS_ATTR_PA_MAXRXHSGEAR 0x1587
+
+/*
  * Request Descriptor Definitions
  */
 
@@ -951,6 +963,23 @@ enum attr_idn {
     UFS_QUERY_ATTR_IDN_COUNT,
 };
 
+/* HID (Host Initiated Defragmentation) operation values for bDefragOperation */
+enum ufs_hid_op {
+    UFS_HID_OP_DISABLE = 0x00,
+    UFS_HID_OP_ANALYSIS = 0x01,
+    UFS_HID_OP_DEFRAG = 0x02,
+};
+
+/* HID state values for bHIDState */
+enum ufs_hid_state {
+    UFS_HID_STATE_IDLE = 0x00,
+    UFS_HID_STATE_ANALYSIS_IN_PROGRESS = 0x01,
+    UFS_HID_STATE_DEFRAG_REQUIRED = 0x02,
+    UFS_HID_STATE_DEFRAG_IN_PROGRESS = 0x03,
+    UFS_HID_STATE_DEFRAG_COMPLETED = 0x04,
+    UFS_HID_STATE_DEFRAG_NOT_REQUIRED = 0x05,
+};
+
 /* Descriptor idn for Query requests */
 enum desc_idn {
     UFS_QUERY_DESC_IDN_DEVICE = 0x0,
@@ -1142,6 +1171,7 @@ enum {
 /* Possible values for dExtendedUFSFeaturesSupport */
 enum {
     UFS_DEV_WB_SUPPORT = BIT(8),
+    UFS_DEV_HID_SUPPORT = BIT(13),
 };
 
 /* WriteBooster buffer mode */
@@ -1303,7 +1333,11 @@ typedef struct QEMU_PACKED UfsCqEntry {
     uint8_t status;
     uint8_t error;
     uint16_t rsvd1;
-    uint32_t rsvd2[3];
+    uint8_t task_tag;
+    uint8_t lun;
+    uint8_t iid_ext_iid;
+    uint8_t rsvd2;
+    uint32_t rsvd3[2];
 } UfsCqEntry;
 
 static inline void _ufs_check_size(void)

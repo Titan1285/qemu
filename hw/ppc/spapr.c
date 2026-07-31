@@ -38,6 +38,7 @@
 #include "system/system.h"
 #include "system/hostmem.h"
 #include "system/numa.h"
+#include "system/physmem.h"
 #include "system/tcg.h"
 #include "system/qtest.h"
 #include "system/reset.h"
@@ -1858,7 +1859,7 @@ static void spapr_machine_reset(MachineState *machine, ResetType type)
 
         spapr_cpu_set_entry_state(first_ppc_cpu, SPAPR_ENTRY_POINT,
                                   0, fdt_addr, 0);
-        cpu_physical_memory_write(fdt_addr, fdt, fdt_totalsize(fdt));
+        physical_memory_write(fdt_addr, fdt, fdt_totalsize(fdt));
     }
 
     g_free(spapr->fdt_blob);
@@ -3517,6 +3518,8 @@ static void spapr_machine_finalizefn(Object *obj)
     SpaprMachineState *spapr = SPAPR_MACHINE(obj);
 
     g_free(spapr->kvm_type);
+    g_free(spapr->host_model);
+    g_free(spapr->host_serial);
 }
 
 void spapr_do_system_reset_on_cpu(CPUState *cs, run_on_cpu_data arg)

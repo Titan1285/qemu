@@ -160,6 +160,11 @@
 #define AST2700_SCU_CPU_SCRATCH_1   TO_REG(0x784)
 #define AST2700_SCU_VGA_SCRATCH_0   TO_REG(0x900)
 
+#define AST2700_SCUIO_RNG_CTRL          TO_REG(0xF0)
+#define AST2700_SCUIO_RNG_CTRL_MASK     0x2F
+#define AST2700_SCUIO_RNG_CTRL_DIS      BIT(0)
+#define AST2700_SCUIO_RNG_CTRL_VLD      BIT(31)
+#define AST2700_SCUIO_RNG_DATA          TO_REG(0xF4)
 #define AST2700_SCUIO_CLK_STOP_CTL_1    TO_REG(0x240)
 #define AST2700_SCUIO_CLK_STOP_CLR_1    TO_REG(0x244)
 #define AST2700_SCUIO_CLK_STOP_CTL_2    TO_REG(0x260)
@@ -624,15 +629,6 @@ static void aspeed_scu_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, aspeed_scu_properties);
 }
 
-static const TypeInfo aspeed_scu_info = {
-    .name = TYPE_ASPEED_SCU,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_scu_class_init,
-    .class_size    = sizeof(AspeedSCUClass),
-    .abstract      = true,
-};
-
 static void aspeed_2400_scu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -648,13 +644,6 @@ static void aspeed_2400_scu_class_init(ObjectClass *klass, const void *data)
     asc->ops = &aspeed_ast2400_scu_ops;
 }
 
-static const TypeInfo aspeed_2400_scu_info = {
-    .name = TYPE_ASPEED_2400_SCU,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_2400_scu_class_init,
-};
-
 static void aspeed_2500_scu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -669,13 +658,6 @@ static void aspeed_2500_scu_class_init(ObjectClass *klass, const void *data)
     asc->clkin_25Mhz = false;
     asc->ops = &aspeed_ast2500_scu_ops;
 }
-
-static const TypeInfo aspeed_2500_scu_info = {
-    .name = TYPE_ASPEED_2500_SCU,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_2500_scu_class_init,
-};
 
 static uint64_t aspeed_ast2600_scu_read(void *opaque, hwaddr offset,
                                         unsigned size)
@@ -859,13 +841,6 @@ static void aspeed_2600_scu_class_init(ObjectClass *klass, const void *data)
     asc->ops = &aspeed_ast2600_scu_ops;
 }
 
-static const TypeInfo aspeed_2600_scu_info = {
-    .name = TYPE_ASPEED_2600_SCU,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_2600_scu_class_init,
-};
-
 static uint64_t aspeed_ast2700_scu_read(void *opaque, hwaddr offset,
                                         unsigned size)
 {
@@ -877,13 +852,6 @@ static uint64_t aspeed_ast2700_scu_read(void *opaque, hwaddr offset,
                       "%s: Out-of-bounds read at offset 0x%" HWADDR_PRIx "\n",
                 __func__, offset);
         return 0;
-    }
-
-    switch (reg) {
-    default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "%s: Unhandled read at offset 0x%" HWADDR_PRIx "\n",
-                      __func__, offset);
     }
 
     trace_aspeed_ast2700_scu_read(offset, size, s->regs[reg]);
@@ -992,10 +960,11 @@ static uint64_t aspeed_ast2700_scuio_read(void *opaque, hwaddr offset,
     }
 
     switch (reg) {
-    default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      "%s: Unhandled read at offset 0x%" HWADDR_PRIx "\n",
-                      __func__, offset);
+    case AST2700_SCUIO_RNG_DATA:
+        if (!(s->regs[AST2700_SCUIO_RNG_CTRL] & AST2700_SCUIO_RNG_CTRL_DIS)) {
+            s->regs[AST2700_SCUIO_RNG_DATA] = aspeed_scu_get_random();
+        }
+        break;
     }
 
     trace_aspeed_ast2700_scuio_read(offset, size, s->regs[reg]);
@@ -1021,6 +990,18 @@ static void aspeed_ast2700_scuio_write(void *opaque, hwaddr offset,
     trace_aspeed_ast2700_scuio_write(offset, size, data);
 
     switch (reg) {
+    case AST2700_SCUIO_RNG_CTRL:
+        data &= AST2700_SCUIO_RNG_CTRL_MASK;
+        if (data & AST2700_SCUIO_RNG_CTRL_DIS) {
+            data &= ~AST2700_SCUIO_RNG_CTRL_VLD;
+            s->regs[AST2700_SCUIO_RNG_DATA] = 0;
+        } else {
+            s->regs[AST2700_SCUIO_RNG_DATA] = aspeed_scu_get_random();
+            data |= AST2700_SCUIO_RNG_CTRL_VLD;
+        }
+        s->regs[reg] = data;
+        updated = true;
+        break;
     case AST2700_SCUIO_CLK_STOP_CTL_1:
     case AST2700_SCUIO_CLK_STOP_CTL_2:
         s->regs[reg] |= data;
@@ -1099,20 +1080,6 @@ static void aspeed_2700_scuio_class_init(ObjectClass *klass, const void *data)
     asc->ops = &aspeed_ast2700_scuio_ops;
 }
 
-static const TypeInfo aspeed_2700_scu_info = {
-    .name = TYPE_ASPEED_2700_SCU,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_2700_scu_class_init,
-};
-
-static const TypeInfo aspeed_2700_scuio_info = {
-    .name = TYPE_ASPEED_2700_SCUIO,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_2700_scuio_class_init,
-};
-
 static const uint32_t ast1030_a1_resets[ASPEED_AST2600_SCU_NR_REGS] = {
     [AST2600_SYS_RST_CTRL]      = 0xFFC3FED8,
     [AST2600_SYS_RST_CTRL2]     = 0x09FFFFFC,
@@ -1158,22 +1125,51 @@ static void aspeed_1030_scu_class_init(ObjectClass *klass, const void *data)
     asc->ops = &aspeed_ast2600_scu_ops;
 }
 
-static const TypeInfo aspeed_1030_scu_info = {
-    .name = TYPE_ASPEED_1030_SCU,
-    .parent = TYPE_ASPEED_SCU,
-    .instance_size = sizeof(AspeedSCUState),
-    .class_init = aspeed_1030_scu_class_init,
+static const TypeInfo aspeed_scu_types[] = {
+    {
+        .name = TYPE_ASPEED_SCU,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_scu_class_init,
+        .class_size    = sizeof(AspeedSCUClass),
+        .abstract      = true,
+    },
+    {
+        .name = TYPE_ASPEED_1030_SCU,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_1030_scu_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2400_SCU,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_2400_scu_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2500_SCU,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_2500_scu_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2600_SCU,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_2600_scu_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2700_SCU,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_2700_scu_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2700_SCUIO,
+        .parent = TYPE_ASPEED_SCU,
+        .instance_size = sizeof(AspeedSCUState),
+        .class_init = aspeed_2700_scuio_class_init,
+    }
 };
 
-static void aspeed_scu_register_types(void)
-{
-    type_register_static(&aspeed_scu_info);
-    type_register_static(&aspeed_2400_scu_info);
-    type_register_static(&aspeed_2500_scu_info);
-    type_register_static(&aspeed_2600_scu_info);
-    type_register_static(&aspeed_1030_scu_info);
-    type_register_static(&aspeed_2700_scu_info);
-    type_register_static(&aspeed_2700_scuio_info);
-}
-
-type_init(aspeed_scu_register_types);
+DEFINE_TYPES(aspeed_scu_types)

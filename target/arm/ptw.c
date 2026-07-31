@@ -13,11 +13,13 @@
 #include "exec/page-protection.h"
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
+#ifdef CONFIG_TCG
 #include "accel/tcg/probe.h"
+#include "target/arm/tcg/idau.h"
+#endif
 #include "cpu.h"
 #include "internals.h"
 #include "cpu-features.h"
-#include "target/arm/tcg/idau.h"
 
 typedef struct S1Translate {
     /*
@@ -341,10 +343,20 @@ bool arm_granule_protection_check(ARMGranuleProtectionConfig config,
         .space = ARMSS_Root,
     };
     const uint64_t gpccr = config.gpccr;
+    const uint64_t gpcbw = config.gpcbw;
     unsigned pps, pgs, l0gptsz, level = 0;
     uint64_t tableaddr, pps_mask, align, entry, index;
     MemTxResult result;
     int gpi;
+
+    const uint64_t BW_ADDR_SHIFT = 30;
+    const uint64_t BW_SIZE_SHIFT = 30;
+    const uint64_t BW_STRIDE_SHIFT = 40;
+
+    uint64_t bw_size_field = FIELD_EX64(gpcbw, GPCBW, BWSIZE);
+    uint64_t bw_stride_field = FIELD_EX64(gpcbw, GPCBW, BWSTRIDE);
+    uint64_t bw_addr = FIELD_EX64(gpcbw, GPCBW, BWADDR) << BW_ADDR_SHIFT;
+    uint64_t bw_mask = 0;
 
     /*
      * We assume Granule Protection Check is enabled when
@@ -397,6 +409,58 @@ bool arm_granule_protection_check(ARMGranuleProtectionConfig config,
         goto fault_walk;
     }
 
+    /* At this point, GPCCR_EL3 is valid */
+
+    /*
+     * GPC Priority 1 (R_GMGRR):
+     * If GPCCR_EL3.GPCBW is 1 and the configuration GPCBW
+     * is invalid, the access fails as GPT walk fault at level 0.
+     */
+    if (FIELD_EX64(gpccr, GPCCR, GPCBW)) {
+        uint64_t bw_size = 0;
+        uint64_t bw_stride = 0;
+
+        /* BWSIZE, BWSTRIDE have a limited number of acceptable values. */
+        switch (bw_size_field) {
+        case 0b000:
+        case 0b001:
+        case 0b010:
+        case 0b100:
+        case 0b110:
+            bw_size = 1ULL << (bw_size_field + BW_SIZE_SHIFT);
+            break;
+        default: /* Reserved value */
+            goto fault_walk;
+        }
+        switch (bw_stride_field) {
+        case 0b00000:
+        case 0b00010:
+        case 0b00100:
+        case 0b00110:
+        case 0b00111:
+        case 0b01000:
+        case 0b01001:
+        case 0b01010:
+        case 0b10000:
+            bw_stride = 1ULL << (bw_stride_field + BW_STRIDE_SHIFT);
+            break;
+        default: /* Reserved value */
+            goto fault_walk;
+        }
+        /*
+         * GPCBW is invalid if the base address is:
+         * not aligned to the size programmed in BWSIZE, or
+         * greater than or equal to the stride value configured by BWSTRIDE.
+         * We can make bw_mask which marks exactly which bits in bw_addr may
+         * be set (gpcbwu:gpcbwl).
+         */
+        bw_mask = bw_stride - bw_size;
+
+        if (bw_addr & ~bw_mask) {
+            goto fault_walk;
+        }
+    }
+
     /* Note this field is read-only and fixed at reset. */
     l0gptsz = 30 + FIELD_EX64(gpccr, GPCCR, L0GPTSZ);
 
@@ -429,6 +493,20 @@ bool arm_granule_protection_check(ARMGranuleProtectionConfig config,
             return true;
         }
         goto fault_fail;
+    }
+
+    /*
+     * Bypass window check.
+     * I_JJLRM: Granule Protection Table (GPT) lookups can be skipped
+     * in portions of the memory map by using GPC bypass windows.
+     * I_XNHTX: The GPC bypass window check (...) is performed
+     * immediately after priority 3.
+     * bw_mask from earlier makes this check for us.
+     */
+    if (FIELD_EX64(gpccr, GPCCR, GPCBW)) {
+        if ((paddress & bw_mask) == bw_addr) {
+            return true;
+        }
     }
 
     /* GPC Priority 4: the base address of GPTBR_EL3 exceeds PPS. */
@@ -1412,9 +1490,14 @@ static int get_S2prot_indirect(CPUARMState *env, GetPhysAddrResult *result,
                   PAGE_READ | PAGE_WRITE },
     };
 
-    uint64_t pir = (env->cp15.scr_el3 & SCR_PIEN ? env->cp15.s2pir_el2 : 0);
-    int s2pi = extract64(pir, pi_index * 4, 4);
+    uint64_t pir = env->cp15.s2pir_el2;
+    int s2pi;
 
+    if (arm_feature(env, ARM_FEATURE_EL3) && !(env->cp15.scr_el3 & SCR_PIEN)) {
+        pir = 0;
+    }
+
+    s2pi = extract64(pir, pi_index * 4, 4);
     result->f.prot = perm_table[s2pi][2];
     return perm_table[s2pi][s1_is_el0];
 }
@@ -1951,9 +2034,18 @@ static bool get_phys_addr_lpae(CPUARMState *env, S1Translate *ptw,
      * validation to do here.
      */
     if (inputsize < addrsize) {
-        uint64_t top_bits = sextract64(address, inputsize,
-                                           addrsize - inputsize);
-        if (-top_bits != param.select) {
+        /*
+         * If MTX is enabled, bits 56-59 aren't checked for canonicity
+         * during translation, since they will later be checked during
+         * the tag check step.
+         */
+
+        uint64_t cmp_mask = MAKE_64BIT_MASK(inputsize, addrsize - inputsize);
+
+        if (param.mtx) {
+            cmp_mask &= ~MAKE_64BIT_MASK(56, 4);
+        }
+        if ((address ^ -param.select) & cmp_mask) {
             /* The gap between the two regions is a Translation fault */
             goto do_translation_fault;
         }
@@ -2809,6 +2901,8 @@ static bool get_phys_addr_pmsav7(CPUARMState *env,
     return (ptw->in_prot_check & ~result->f.prot) == 0;
 }
 
+#ifdef CONFIG_TCG
+
 static uint32_t *regime_rbar(CPUARMState *env, ARMMMUIdx mmu_idx,
                              uint32_t secure)
 {
@@ -3238,6 +3332,20 @@ static bool get_phys_addr_pmsav8(CPUARMState *env,
     return ret;
 }
 
+#else /* !CONFIG_TCG */
+
+static bool get_phys_addr_pmsav8(CPUARMState *env,
+                                 S1Translate *ptw,
+                                 uint32_t address,
+                                 MMUAccessType access_type,
+                                 GetPhysAddrResult *result,
+                                 ARMMMUFaultInfo *fi)
+{
+    g_assert_not_reached();
+}
+
+#endif /* !CONFIG_TCG */
+
 /*
  * Translate from the 4-bit stage 2 representation of
  * memory attributes (without cache-allocation hints) to
@@ -3415,7 +3523,7 @@ static ARMCacheAttrs combine_cacheattrs(uint64_t hcr,
                                         ARMCacheAttrs s1, ARMCacheAttrs s2)
 {
     ARMCacheAttrs ret;
-    bool tagged = false;
+    bool tagged = false, notagaccess = false;
 
     assert(!s1.is_s2_format);
     ret.is_s2_format = false;
@@ -3423,6 +3531,18 @@ static ARMCacheAttrs combine_cacheattrs(uint64_t hcr,
     if (s1.attrs == 0xf0) {
         tagged = true;
         s1.attrs = 0xff;
+    }
+
+    if (hcr & HCR_FWB) {
+        if (s2.attrs >= 0xe) {
+            notagaccess = true;
+            s2.attrs = 0x7;
+        }
+    } else {
+        if (s2.attrs == 0x4) {
+            notagaccess = true;
+            s2.attrs = 0xf;
+        }
     }
 
     /* Combine shareability attributes (table D4-43) */
@@ -3456,9 +3576,16 @@ static ARMCacheAttrs combine_cacheattrs(uint64_t hcr,
         ret.shareability = 2;
     }
 
-    /* TODO: CombineS1S2Desc does not consider transient, only WB, RWA. */
+    /*
+     * The attr encoding 0xe0 corresponds to Tagged NoTagAccess and is only
+     * valid with FEAT_MTE_PERM (otherwise RESERVED, constrained
+     * unpredictable)). The presence of this feature is checked in
+     * allocation_tag_mem_probe, where Tagged NoTagAccess has its effect. See
+     * J1.3.5.2 EncodePARAttrs.
+     * TODO: CombineS1S2Desc does not consider transient, only WB, RWA.
+     */
     if (tagged && ret.attrs == 0xff) {
-        ret.attrs = 0xf0;
+        ret.attrs = notagaccess ? 0xe0 : 0xf0;
     }
 
     return ret;
@@ -3495,15 +3622,31 @@ static bool get_phys_addr_disabled(CPUARMState *env,
             int pamax = arm_pamax(env_archcpu(env));
             uint64_t tcr = env->cp15.tcr_el[r_el];
             int addrtop, tbi;
+            bool bit55;
 
             tbi = aa64_va_parameter_tbi(tcr, mmu_idx);
             if (access_type == MMU_INST_FETCH) {
                 tbi &= ~aa64_va_parameter_tbid(tcr, mmu_idx);
             }
-            tbi = (tbi >> extract64(address, 55, 1)) & 1;
+            bit55 = extract64(address, 55, 1);
+            tbi = (tbi >> bit55) & 1;
             addrtop = (tbi ? 55 : 63);
 
-            if (extract64(address, pamax, addrtop - pamax + 1) != 0) {
+            /*
+             * With MTX enabled, bits 56-59 are not checked according to
+             * AArch64.S1DisabledOutput.
+             */
+            uint64_t cmp_mask = MAKE_64BIT_MASK(pamax, addrtop - pamax + 1);
+
+            if (access_type != MMU_INST_FETCH &&
+                cpu_isar_feature(aa64_mte_mtx, env_archcpu(env))) {
+                int mtx = aa64_va_parameter_mtx(tcr, mmu_idx);
+                if (mtx & (1 << bit55)) {
+                    cmp_mask &= ~MAKE_64BIT_MASK(56, 4);
+                }
+            }
+
+            if (address & cmp_mask) {
                 fi->type = ARMFault_AddressSize;
                 fi->level = 0;
                 fi->stage2 = false;
@@ -3817,6 +3960,7 @@ static bool get_phys_addr_gpc(CPUARMState *env, S1Translate *ptw,
         };
         struct ARMGranuleProtectionConfig config = {
             .gpccr = env->cp15.gpccr_el3,
+            .gpcbw = env->cp15.gpcbw_el3,
             .gptbr = env->cp15.gptbr_el3,
             .parange = FIELD_EX64_IDREG(&cpu->isar, ID_AA64MMFR0, PARANGE),
             .support_sel2 = cpu_isar_feature(aa64_sel2, cpu),

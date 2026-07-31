@@ -22,8 +22,8 @@
 #include "qemu/timer.h"
 #include "hw/arm/omap.h"
 #include "hw/core/irq.h"
-#include "hw/arm/soc_dma.h"
-#include "exec/cpu-common.h"
+#include "hw/dma/soc_dma.h"
+#include "system/physmem.h"
 
 struct omap_dma_channel_s {
     /* transfer data */
@@ -343,26 +343,22 @@ static void omap_dma_transfer_generic(struct soc_dma_ch_s *dma)
     struct omap_dma_channel_s *ch = dma->opaque;
     struct omap_dma_reg_set_s *a = &ch->active_set;
     int bytes = dma->bytes;
-#ifdef MULTI_REQ
-    uint16_t status = ch->status;
-#endif
 
     do {
         /* Transfer a single element */
         /* FIXME: check the endianness */
         if (!ch->constant_fill)
-            cpu_physical_memory_read(a->src, value, ch->data_type);
+            physical_memory_read(a->src, value, ch->data_type);
         else
             *(uint32_t *) value = ch->color;
 
         if (!ch->transparent_copy || *(uint32_t *) value != ch->color)
-            cpu_physical_memory_write(a->dest, value, ch->data_type);
+            physical_memory_write(a->dest, value, ch->data_type);
 
         a->src += a->elem_delta[0];
         a->dest += a->elem_delta[1];
         a->element ++;
 
-#ifndef MULTI_REQ
         if (a->element == a->elements) {
             /* End of Frame */
             a->element = 0;
@@ -375,78 +371,6 @@ static void omap_dma_transfer_generic(struct soc_dma_ch_s *dma)
                 ch->cpc = a->dest & 0xffff;
         }
     } while ((bytes -= ch->data_type));
-#else
-        /* If the channel is element synchronized, deactivate it */
-        if (ch->sync && !ch->fs && !ch->bs)
-            omap_dma_deactivate_channel(s, ch);
-
-        /* If it is the last frame, set the LAST_FRAME interrupt */
-        if (a->element == 1 && a->frame == a->frames - 1)
-            if (ch->interrupts & LAST_FRAME_INTR)
-                ch->status |= LAST_FRAME_INTR;
-
-        /* If the half of the frame was reached, set the HALF_FRAME
-           interrupt */
-        if (a->element == (a->elements >> 1))
-            if (ch->interrupts & HALF_FRAME_INTR)
-                ch->status |= HALF_FRAME_INTR;
-
-        if (ch->fs && ch->bs) {
-            a->pck_element ++;
-            /* Check if a full packet has been transferred.  */
-            if (a->pck_element == a->pck_elements) {
-                a->pck_element = 0;
-
-                /* Set the END_PKT interrupt */
-                if ((ch->interrupts & END_PKT_INTR) && !ch->src_sync)
-                    ch->status |= END_PKT_INTR;
-
-                /* If the channel is packet-synchronized, deactivate it */
-                if (ch->sync)
-                    omap_dma_deactivate_channel(s, ch);
-            }
-        }
-
-        if (a->element == a->elements) {
-            /* End of Frame */
-            a->element = 0;
-            a->src += a->frame_delta[0];
-            a->dest += a->frame_delta[1];
-            a->frame ++;
-
-            /* If the channel is frame synchronized, deactivate it */
-            if (ch->sync && ch->fs && !ch->bs)
-                omap_dma_deactivate_channel(s, ch);
-
-            /* If the channel is async, update cpc */
-            if (!ch->sync)
-                ch->cpc = a->dest & 0xffff;
-
-            /* Set the END_FRAME interrupt */
-            if (ch->interrupts & END_FRAME_INTR)
-                ch->status |= END_FRAME_INTR;
-
-            if (a->frame == a->frames) {
-                /* End of Block */
-                /* Disable the channel */
-
-                if (!ch->auto_init)
-                    omap_dma_disable_channel(s, ch);
-                else if (ch->repeat || ch->end_prog)
-                    omap_dma_channel_load(ch);
-                else {
-                    ch->waiting_end_prog = 1;
-                    omap_dma_deactivate_channel(s, ch);
-                }
-
-                if (ch->interrupts & END_BLOCK_INTR)
-                    ch->status |= END_BLOCK_INTR;
-            }
-        }
-    } while (status == ch->status && ch->active);
-
-    omap_dma_interrupts_update(s);
-#endif
 }
 
 enum {
@@ -467,7 +391,7 @@ static void omap_dma_transfer_setup(struct soc_dma_ch_s *dma)
     struct omap_dma_reg_set_s *a;
     struct omap_dma_channel_s *ch = dma->opaque;
     struct omap_dma_s *s = dma->dma->opaque;
-    int frames, min_elems, elements[__omap_dma_intr_last];
+    uint32_t frames, min_elems, elements[__omap_dma_intr_last];
 
     a = &ch->active_set;
 
@@ -475,18 +399,18 @@ static void omap_dma_transfer_setup(struct soc_dma_ch_s *dma)
     dest_p = &s->mpu->port[ch->port[1]];
     if ((!ch->constant_fill && !src_p->addr_valid(s->mpu, a->src)) ||
                     (!dest_p->addr_valid(s->mpu, a->dest))) {
-#if 0
-        /* Bus time-out */
-        if (ch->interrupts & TIMEOUT_INTR)
-            ch->status |= TIMEOUT_INTR;
-        omap_dma_deactivate_channel(s, ch);
-        continue;
-#endif
         printf("%s: Bus time-out in DMA%i operation\n",
                         __func__, dma->num);
     }
 
-    min_elems = INT_MAX;
+    /*
+     * The maximum frame count and maximum element count are both 0xffff,
+     * so our worst case possible number of elements to transfer is
+     * 0xffff * 0xffff == 0xfffe0001. We can therefore keep element
+     * counts in a uint32_t and use UINT_MAX as a sentinel value for
+     * "not set" / "condition does not occur".
+     */
+    min_elems = UINT_MAX;
 
     /* Check all the conditions that terminate the transfer starting
      * with those that can occur the soonest.  */
@@ -496,7 +420,7 @@ static void omap_dma_transfer_setup(struct soc_dma_ch_s *dma)
         if (elements[id] < min_elems)   \
             min_elems = elements[id];   \
     } else              \
-        elements[id] = INT_MAX;
+        elements[id] = UINT_MAX;
 
     /* Elements */
     INTR_CHECK(
@@ -548,92 +472,94 @@ static void omap_dma_transfer_setup(struct soc_dma_ch_s *dma)
                     (a->frames - a->frame - 1) * a->elements +
                     (a->elements - a->element))
 
-    dma->bytes = min_elems * ch->data_type;
+    dma->bytes = (uint64_t)min_elems * ch->data_type;
 
     /* Set appropriate interrupts and/or deactivate channels */
 
-#ifdef MULTI_REQ
-    /* TODO: should all of this only be done if dma->update, and otherwise
-     * inside omap_dma_transfer_generic below - check what's faster.  */
-    if (dma->update) {
-#endif
 
-        /* If the channel is element synchronized, deactivate it */
-        if (min_elems == elements[omap_dma_intr_element_sync])
-            omap_dma_deactivate_channel(s, ch);
-
-        /* If it is the last frame, set the LAST_FRAME interrupt */
-        if (min_elems == elements[omap_dma_intr_last_frame])
-            ch->status |= LAST_FRAME_INTR;
-
-        /* If exactly half of the frame was reached, set the HALF_FRAME
-           interrupt */
-        if (min_elems == elements[omap_dma_intr_half_frame])
-            ch->status |= HALF_FRAME_INTR;
-
-        /* If a full packet has been transferred, set the END_PKT interrupt */
-        if (min_elems == elements[omap_dma_intr_packet])
-            ch->status |= END_PKT_INTR;
-
-        /* If the channel is packet-synchronized, deactivate it */
-        if (min_elems == elements[omap_dma_intr_packet_sync])
-            omap_dma_deactivate_channel(s, ch);
-
-        /* If the channel is frame synchronized, deactivate it */
-        if (min_elems == elements[omap_dma_intr_frame_sync])
-            omap_dma_deactivate_channel(s, ch);
-
-        /* Set the END_FRAME interrupt */
-        if (min_elems == elements[omap_dma_intr_frame])
-            ch->status |= END_FRAME_INTR;
-
-        if (min_elems == elements[omap_dma_intr_block]) {
-            /* End of Block */
-            /* Disable the channel */
-
-            if (!ch->auto_init)
-                omap_dma_disable_channel(s, ch);
-            else if (ch->repeat || ch->end_prog)
-                omap_dma_channel_load(ch);
-            else {
-                ch->waiting_end_prog = 1;
-                omap_dma_deactivate_channel(s, ch);
-            }
-
-            if (ch->interrupts & END_BLOCK_INTR)
-                ch->status |= END_BLOCK_INTR;
-        }
-
-        /* Update packet number */
-        if (ch->fs && ch->bs) {
-            a->pck_element += min_elems;
-            a->pck_element %= a->pck_elements;
-        }
-
-        /* TODO: check if we really need to update anything here or perhaps we
-         * can skip part of this.  */
-#ifndef MULTI_REQ
-        if (dma->update) {
-#endif
-            a->element += min_elems;
-
-            frames = a->element / a->elements;
-            a->element = a->element % a->elements;
-            a->frame += frames;
-            a->src += min_elems * a->elem_delta[0] + frames * a->frame_delta[0];
-            a->dest += min_elems * a->elem_delta[1] + frames * a->frame_delta[1];
-
-            /* If the channel is async, update cpc */
-            if (!ch->sync && frames)
-                ch->cpc = a->dest & 0xffff;
-
-            /* TODO: if the destination port is IMIF or EMIFF, set the dirty
-             * bits on it.  */
-#ifndef MULTI_REQ
-        }
-#else
+    /* If the channel is element synchronized, deactivate it */
+    if (min_elems == elements[omap_dma_intr_element_sync]) {
+        omap_dma_deactivate_channel(s, ch);
     }
-#endif
+
+    /* If it is the last frame, set the LAST_FRAME interrupt */
+    if (min_elems == elements[omap_dma_intr_last_frame]) {
+        ch->status |= LAST_FRAME_INTR;
+    }
+
+    /*
+     * If exactly half of the frame was reached, set the HALF_FRAME
+     * interrupt
+     */
+    if (min_elems == elements[omap_dma_intr_half_frame]) {
+        ch->status |= HALF_FRAME_INTR;
+    }
+
+    /* If a full packet has been transferred, set the END_PKT interrupt */
+    if (min_elems == elements[omap_dma_intr_packet]) {
+        ch->status |= END_PKT_INTR;
+    }
+
+    /* If the channel is packet-synchronized, deactivate it */
+    if (min_elems == elements[omap_dma_intr_packet_sync]) {
+        omap_dma_deactivate_channel(s, ch);
+    }
+
+    /* If the channel is frame synchronized, deactivate it */
+    if (min_elems == elements[omap_dma_intr_frame_sync]) {
+        omap_dma_deactivate_channel(s, ch);
+    }
+
+    /* Set the END_FRAME interrupt */
+    if (min_elems == elements[omap_dma_intr_frame]) {
+        ch->status |= END_FRAME_INTR;
+    }
+
+    if (min_elems == elements[omap_dma_intr_block]) {
+        /* End of Block */
+        /* Disable the channel */
+
+        if (!ch->auto_init) {
+            omap_dma_disable_channel(s, ch);
+        } else if (ch->repeat || ch->end_prog) {
+            omap_dma_channel_load(ch);
+        } else {
+            ch->waiting_end_prog = 1;
+            omap_dma_deactivate_channel(s, ch);
+        }
+
+        if (ch->interrupts & END_BLOCK_INTR) {
+            ch->status |= END_BLOCK_INTR;
+        }
+    }
+
+    /* Update packet number */
+    if (ch->fs && ch->bs) {
+        /* Can't overflow: worst case min_elems 0xFFFE0001 + element 0xFFFF */
+        uint32_t new_pck_element = a->pck_element + min_elems;
+        a->pck_element = new_pck_element % a->pck_elements;
+    }
+
+    /*
+     * TODO: check if we really need to update anything here or perhaps we
+     * can skip part of this.
+     */
+    if (dma->update) {
+        /* Can't overflow: worst case min_elems 0xFFFE0001 + element 0xFFFF */
+        uint32_t new_element = a->element + min_elems;
+        a->element += min_elems;
+
+        frames = new_element / a->elements;
+        a->element = new_element % a->elements;
+        a->frame += frames;
+        a->src += (uint64_t)min_elems * a->elem_delta[0] + frames * a->frame_delta[0];
+        a->dest += (uint64_t)min_elems * a->elem_delta[1] + frames * a->frame_delta[1];
+
+        /* If the channel is async, update cpc */
+        if (!ch->sync && frames) {
+            ch->cpc = a->dest & 0xffff;
+        }
+    }
 
     omap_dma_interrupts_update(s);
 }

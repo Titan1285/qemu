@@ -40,6 +40,9 @@
 #define UFS_TOO_HIGH_TEMP_BOUNDARY 160
 #define UFS_TOO_LOW_TEMP_BOUNDARY 60
 
+#define UFS_HID_DEFRAG_BATCH_DIV 10 /* ~10% of remaining per tick */
+#define UFS_HID_PROGRESS_COMPLETE 100
+
 static void ufs_exec_req(UfsRequest *req);
 static void ufs_clear_req(UfsRequest *req);
 
@@ -360,8 +363,32 @@ static void ufs_process_db(UfsHc *u, uint32_t val)
     qemu_bh_schedule(u->doorbell_bh);
 }
 
+/*
+ * Return canned PA layer attribute values. The emulated link has no PHY,
+ * so these are purely declarative: a single lane in HS-Gear 4, FAST_MODE.
+ */
+static uint32_t ufs_uic_dme_get_value(uint16_t attr_id)
+{
+    switch (attr_id) {
+    case UFS_ATTR_PA_AVAILTXDATALANES:
+    case UFS_ATTR_PA_AVAILRXDATALANES:
+    case UFS_ATTR_PA_CONNECTEDTXDATALANES:
+    case UFS_ATTR_PA_CONNECTEDRXDATALANES:
+        return 1;
+    case UFS_ATTR_PA_MAXRXHSGEAR:
+    case UFS_ATTR_PA_MAXRXPWMGEAR:
+        return 4;
+    case UFS_ATTR_PA_PWRMODE:
+        return (1 << 4) | 1;
+    default:
+        return 0;
+    }
+}
+
 static void ufs_process_uiccmd(UfsHc *u, uint32_t val)
 {
+    uint16_t attr_id;
+
     trace_ufs_process_uiccmd(val, u->reg.ucmdarg1, u->reg.ucmdarg2,
                              u->reg.ucmdarg3);
     /*
@@ -374,6 +401,22 @@ static void ufs_process_uiccmd(UfsHc *u, uint32_t val)
         u->reg.hcs = FIELD_DP32(u->reg.hcs, HCS, UTRLRDY, 1);
         u->reg.hcs = FIELD_DP32(u->reg.hcs, HCS, UTMRLRDY, 1);
         u->reg.ucmdarg2 = UFS_UIC_CMD_RESULT_SUCCESS;
+        break;
+    case UFS_UIC_CMD_DME_GET:
+    case UFS_UIC_CMD_DME_PEER_GET:
+        attr_id = (u->reg.ucmdarg1 >> 16) & 0xFFFF;
+        u->reg.ucmdarg3 = ufs_uic_dme_get_value(attr_id);
+        u->reg.ucmdarg2 = UFS_UIC_CMD_RESULT_SUCCESS;
+        break;
+    case UFS_UIC_CMD_DME_SET:
+    case UFS_UIC_CMD_DME_PEER_SET:
+        attr_id = (u->reg.ucmdarg1 >> 16) & 0xFFFF;
+        u->reg.ucmdarg2 = UFS_UIC_CMD_RESULT_SUCCESS;
+        /* DME_SET(PA_PWRMODE) is a power-mode-change trigger. */
+        if (val == UFS_UIC_CMD_DME_SET && attr_id == UFS_ATTR_PA_PWRMODE) {
+            u->reg.is = FIELD_DP32(u->reg.is, IS, UPMS, 1);
+            u->reg.hcs = FIELD_DP32(u->reg.hcs, HCS, UPMCRS, UFS_PWR_LOCAL);
+        }
         break;
     /*
      * TODO: Revisit after PM implementation
@@ -477,6 +520,12 @@ static void ufs_mcq_process_cq(void *opaque)
         req->cqe.prdt_off = cpu_to_le16(prdt_off);
         req->cqe.status = status;
         req->cqe.error = 0;
+        /*
+         * From UFSHCI 4.1 the host derives the request tag from cqe.task_tag
+         * rather than decoding it from utp_addr.
+         */
+        req->cqe.task_tag = req->req_upiu.header.task_tag;
+        req->cqe.lun = req->req_upiu.header.lun;
 
         ret = ufs_addr_write(u, cq->addr + tail, &req->cqe, sizeof(req->cqe));
         if (ret) {
@@ -1288,10 +1337,9 @@ static const int attr_permission[UFS_QUERY_ATTR_IDN_COUNT] = {
     [UFS_QUERY_ATTR_IDN_REFRESH_UNIT] = UFS_QUERY_ATTR_READ,
     [UFS_QUERY_ATTR_IDN_TIMESTAMP] = UFS_QUERY_ATTR_WRITE,
     [UFS_QUERY_ATTR_IDN_DEVICE_LEVEL_EXCEPTION_ID] = UFS_QUERY_ATTR_READ,
-    /* host initiated defragmentation is not supported */
-    [UFS_QUERY_ATTR_IDN_DEFRAG_OP] = UFS_QUERY_ATTR_READ,
+    [UFS_QUERY_ATTR_IDN_DEFRAG_OP] = UFS_QUERY_ATTR_READ | UFS_QUERY_ATTR_WRITE,
     [UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE] = UFS_QUERY_ATTR_READ,
-    [UFS_QUERY_ATTR_IDN_HID_SIZE] = UFS_QUERY_ATTR_READ,
+    [UFS_QUERY_ATTR_IDN_HID_SIZE] = UFS_QUERY_ATTR_READ | UFS_QUERY_ATTR_WRITE,
     [UFS_QUERY_ATTR_IDN_HID_PROG_RATIO] = UFS_QUERY_ATTR_READ,
     [UFS_QUERY_ATTR_IDN_HID_STATE] = UFS_QUERY_ATTR_READ,
     [UFS_QUERY_ATTR_IDN_WB_BUFF_RESIZE_HINT] = UFS_QUERY_ATTR_READ,
@@ -1371,8 +1419,31 @@ static inline uint32_t ufs_wb_read_resize_status(UfsHc *u)
     return value;
 }
 
+static void ufs_hid_reset(UfsHc *u)
+{
+    u->attributes.defrag_op = UFS_HID_OP_DISABLE;
+    u->attributes.hid_state = UFS_HID_STATE_IDLE;
+    u->attributes.hid_prog_ratio = 0;
+    u->attributes.hid_avail_size = cpu_to_be32(0xFFFFFFFF);
+    u->hid_defrag_total = 0;
+    u->hid_defrag_remaining = 0;
+}
+
+static uint32_t ufs_hid_read_progress_ratio(UfsHc *u)
+{
+    uint32_t value = u->attributes.hid_prog_ratio;
+
+    if (value == UFS_HID_PROGRESS_COMPLETE) {
+        ufs_hid_reset(u);
+    }
+
+    return value;
+}
+
 static uint32_t ufs_read_attr_value(UfsHc *u, uint8_t idn)
 {
+    uint8_t state;
+
     switch (idn) {
     case UFS_QUERY_ATTR_IDN_BOOT_LU_EN:
         return u->attributes.boot_lun_en;
@@ -1451,9 +1522,16 @@ static uint32_t ufs_read_attr_value(UfsHc *u, uint8_t idn)
     case UFS_QUERY_ATTR_IDN_HID_SIZE:
         return be32_to_cpu(u->attributes.hid_size);
     case UFS_QUERY_ATTR_IDN_HID_PROG_RATIO:
-        return u->attributes.hid_prog_ratio;
+        return ufs_hid_read_progress_ratio(u);
     case UFS_QUERY_ATTR_IDN_HID_STATE:
-        return u->attributes.hid_state;
+        state = u->attributes.hid_state;
+
+        if (state == UFS_HID_STATE_DEFRAG_COMPLETED ||
+            state == UFS_HID_STATE_DEFRAG_NOT_REQUIRED) {
+            ufs_hid_reset(u);
+        }
+
+        return state;
     case UFS_QUERY_ATTR_IDN_WB_BUFF_RESIZE_HINT:
         return u->attributes.wb_buffer_resize_hint;
     case UFS_QUERY_ATTR_IDN_WB_BUFF_RESIZE_STATUS:
@@ -1604,6 +1682,26 @@ static bool ufs_wb_pinned_min_size(UfsHc *u, uint32_t value)
     return true;
 }
 
+static QueryRespCode ufs_hid_write_defrag_operation(UfsHc *u, uint32_t value)
+{
+    switch (value) {
+    case UFS_HID_OP_DISABLE:
+        ufs_hid_reset(u);
+        break;
+    case UFS_HID_OP_ANALYSIS:
+    case UFS_HID_OP_DEFRAG:
+        u->attributes.defrag_op = value;
+        u->attributes.hid_state = UFS_HID_STATE_ANALYSIS_IN_PROGRESS;
+        u->attributes.hid_prog_ratio = 0;
+        break;
+    default:
+        return UFS_QUERY_RESULT_INVALID_VALUE;
+    }
+
+    trace_ufs_hid_defrag_operation(value, u->attributes.hid_state);
+    return UFS_QUERY_RESULT_SUCCESS;
+}
+
 static QueryRespCode ufs_write_attr_value(UfsHc *u, uint8_t idn, uint32_t value)
 {
     switch (idn) {
@@ -1667,6 +1765,11 @@ static QueryRespCode ufs_write_attr_value(UfsHc *u, uint8_t idn, uint32_t value)
         if (!ufs_wb_pinned_min_size(u, value)) {
             return UFS_QUERY_RESULT_INVALID_VALUE;
         }
+        break;
+    case UFS_QUERY_ATTR_IDN_DEFRAG_OP:
+        return ufs_hid_write_defrag_operation(u, value);
+    case UFS_QUERY_ATTR_IDN_HID_SIZE:
+        u->attributes.hid_size = cpu_to_be32(value);
         break;
     default:
         g_assert_not_reached();
@@ -2211,11 +2314,92 @@ static void ufs_wb_process_resize(UfsHc *u)
     u->attributes.wb_buffer_resize_status = UFS_WB_RESIZE_COMPLETED;
 }
 
+static void ufs_hid_process(UfsHc *u)
+{
+    uint32_t requested, batch, done;
+
+    switch (u->attributes.hid_state) {
+    case UFS_HID_STATE_ANALYSIS_IN_PROGRESS:
+        u->attributes.hid_avail_size = cpu_to_be32(u->hid_fragment_count);
+        if (u->hid_fragment_count > 0) {
+            u->attributes.hid_state = UFS_HID_STATE_DEFRAG_REQUIRED;
+        } else {
+            u->attributes.hid_state = UFS_HID_STATE_DEFRAG_NOT_REQUIRED;
+        }
+
+        if (u->attributes.defrag_op == UFS_HID_OP_ANALYSIS ||
+            u->attributes.hid_state == UFS_HID_STATE_DEFRAG_NOT_REQUIRED) {
+            u->attributes.defrag_op = UFS_HID_OP_DISABLE;
+        }
+
+        trace_ufs_hid_defrag_operation(u->attributes.defrag_op,
+                                       u->attributes.hid_state);
+        break;
+
+    case UFS_HID_STATE_DEFRAG_REQUIRED:
+        if (u->attributes.defrag_op != UFS_HID_OP_DEFRAG) {
+            break;
+        }
+
+        requested = MIN(be32_to_cpu(u->attributes.hid_size),
+                        be32_to_cpu(u->attributes.hid_avail_size));
+        if (!requested) {
+            u->attributes.hid_state = UFS_HID_STATE_DEFRAG_COMPLETED;
+            u->attributes.defrag_op = UFS_HID_OP_DISABLE;
+            u->attributes.hid_prog_ratio = UFS_HID_PROGRESS_COMPLETE;
+
+            trace_ufs_hid_defrag_operation(u->attributes.defrag_op,
+                                           u->attributes.hid_state);
+            break;
+        }
+
+        u->attributes.hid_state = UFS_HID_STATE_DEFRAG_IN_PROGRESS;
+        u->hid_defrag_total = requested;
+        u->hid_defrag_remaining = requested;
+        u->attributes.hid_prog_ratio = 0;
+        break;
+
+    case UFS_HID_STATE_DEFRAG_IN_PROGRESS:
+        if (u->hid_defrag_remaining > 0) {
+            batch = u->hid_defrag_remaining / UFS_HID_DEFRAG_BATCH_DIV;
+            if (batch == 0) {
+                batch = 1;
+            }
+
+            u->hid_defrag_remaining -= batch;
+            u->hid_fragment_count -= batch;
+
+            done = u->hid_defrag_total - u->hid_defrag_remaining;
+            u->attributes.hid_prog_ratio =
+                ((uint64_t)done * UFS_HID_PROGRESS_COMPLETE) /
+                u->hid_defrag_total;
+
+            trace_ufs_hid_defrag_progress(u->hid_defrag_remaining,
+                                          u->attributes.hid_prog_ratio);
+        }
+
+        if (!u->hid_defrag_remaining) {
+            u->attributes.hid_state = UFS_HID_STATE_DEFRAG_COMPLETED;
+            u->attributes.defrag_op = UFS_HID_OP_DISABLE;
+            u->attributes.hid_prog_ratio = UFS_HID_PROGRESS_COMPLETE;
+
+            trace_ufs_hid_defrag_operation(u->attributes.defrag_op,
+                                           u->attributes.hid_state);
+        }
+
+        break;
+
+    default:
+        break;
+    }
+}
+
 static void ufs_process_idle(UfsHc *u)
 {
     ufs_wb_process_flush(u);
     ufs_wb_process_resize(u);
     ufs_wb_sync_buffer_size(u);
+    ufs_hid_process(u);
 }
 
 static inline bool ufs_check_idle(UfsHc *u)
@@ -2384,8 +2568,8 @@ static void ufs_init_hc(UfsHc *u)
     uint32_t mcqconfig = 0;
     uint32_t mcqcap = 0;
     uint32_t ext_wb_sup = WB_RESIZE | WB_FIFO | WB_PINNED;
-    uint32_t ext_ufs_feat_sup =
-        UFS_DEV_WB_SUPPORT | UFS_DEV_HIGH_TEMP_NOTIF | UFS_DEV_LOW_TEMP_NOTIF;
+    uint32_t ext_ufs_feat_sup = UFS_DEV_WB_SUPPORT | UFS_DEV_HIGH_TEMP_NOTIF |
+                                UFS_DEV_LOW_TEMP_NOTIF | UFS_DEV_HID_SUPPORT;
     int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL_RT);
 
     u->reg_size = pow2ceil(ufs_reg_size(u));
@@ -2487,6 +2671,8 @@ static void ufs_init_hc(UfsHc *u)
     u->attributes.max_num_of_rtt = 0x02;
     u->attributes.device_too_high_temp_boundary = UFS_TOO_HIGH_TEMP_BOUNDARY;
     u->attributes.device_too_low_temp_boundary = UFS_TOO_LOW_TEMP_BOUNDARY;
+    u->attributes.hid_avail_size = cpu_to_be32(0xFFFFFFFF);
+    u->attributes.hid_size = cpu_to_be32(0xFFFFFFFF);
 
     memset(&u->flags, 0, sizeof(u->flags));
     u->flags.permanently_disable_fw_update = 1;
