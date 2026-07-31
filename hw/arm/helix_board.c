@@ -226,8 +226,8 @@ static void helix_fw_cfg_init(MachineState *ms) {
     hwaddr fw_cfg_base = helix_memmap[HELIX_FW_CFG].base;
 
 
-
-    m->fw_cfg = fw_cfg_init_mem_dma(fw_cfg_base + 8, fw_cfg_base, 8, fw_cfg_base + 16, &address_space_memory);
+    // NOTE: Newer version of QEMU handle setting this up internally
+    m->fw_cfg = fw_cfg_init_mem_dma(fw_cfg_base, &address_space_memory);
 
     if (!m->fw_cfg) {
         error_report("Failed to initialize FW_CFG device!\n");
