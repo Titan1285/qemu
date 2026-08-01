@@ -51,21 +51,25 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixFramebufferState, HELIX_RAMFB)
 #define HELIX_SRAM_BASE     0x00010000
 #define HELIX_SRAM_SIZE     0x80000     // 512KB
 
-// TODO: Align MMIO regions properly in memory map...
-#define HELIX_UART_BASE     0x01000000
+#define HELIX_MMIO_BASE     0x01000000
+
+#define HELIX_UART_BASE     (HELIX_MMIO_BASE + 0x000000)
 #define HELIX_UART_SIZE     0x1000      // 4KB
 
-#define HELIX_GICD_BASE     0x01001000
+#define HELIX_GICD_BASE     (HELIX_MMIO_BASE + 0x010000)
 #define HELIX_GICD_SIZE     0x10000     // 64KB
 
-#define HELIX_GICR_BASE     0x01011000
+#define HELIX_GICR_BASE     (HELIX_MMIO_BASE + 0x020000)
 #define HELIX_GICR_SIZE     0x20000     // 128KB
 
-#define HELIX_SDHCI_BASE    0x01031000
+#define HELIX_SDHCI_BASE    (HELIX_MMIO_BASE + 0x040000)
 #define HELIX_SDHCI_SIZE    0x10000     // 64KB
 
-#define HELIX_FW_CFG_BASE   0x01041000
+#define HELIX_FW_CFG_BASE   (HELIX_MMIO_BASE + 0x050000)
 #define HELIX_FW_CFG_SIZE   0x20        // 32 bytes
+
+#define HELIX_USB_BASE      (HELIX_MMIO_BASE + 0x060000)
+#define HELIX_USB_SIZE      0x2000      // 64KB
 
 #define HELIX_DRAM_BASE     0x40000000
 #define HELIX_DRAM_SIZE     0x3FFF0000 // 1GB (minus 16MB for framebuffer)

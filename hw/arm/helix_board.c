@@ -13,6 +13,7 @@
 #include "system/address-spaces.h"
 #include "qapi/error.h"
 #include "hw/core/loader.h"
+#include "system/device_tree.h"
 #include "system/reset.h"
 #include "hw/block/flash.h"
 #include "hw/core/qdev-properties.h"
@@ -33,6 +34,8 @@
 #include "ui/console.h"
 #include "standard-headers/drm/drm_fourcc.h"
 #include "hw/display/framebuffer.h"
+#include "libfdt.h"
+
 
 
 
@@ -89,6 +92,9 @@ static void helix_gic_init(MachineState *ms) {
     qdev_prop_set_uint32(m->gic, "num-cpu", num_smp ? num_smp : 1);
 
     qdev_prop_set_uint32(m->gic, "num-irq", NUM_IRQS + 32);
+
+    // NOTE: Because the board is started in EL3 (secure monitor), it's "secure" by default. The GIC might need
+    //       this to be changed to "true", and setup for both secure and non-secure (maybe)
     qdev_prop_set_bit(m->gic, "has-security-extensions", false);
 
     redist_capacity = helix_memmap[HELIX_GICR].size / GICV3_REDIST_SIZE;
@@ -155,6 +161,8 @@ static void helix_uart_init(MachineState *ms) {
 static void helix_cpu_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     Object *cpu_obj;
+    hwaddr bootrom_base = helix_memmap[HELIX_ROM].base;
+
 
     cpu_obj = object_new(ARM_CPU_TYPE_NAME("cortex-a57"));
     m->cpu = ARM_CPU(cpu_obj);
@@ -163,13 +171,13 @@ static void helix_cpu_init(MachineState *ms) {
     object_property_set_bool(cpu_obj, "aarch64", true, &error_fatal);
 
     // Set reset vector base address to point to ROM code
-    object_property_set_uint(cpu_obj, "rvbar", helix_memmap[HELIX_ROM].base, &error_fatal);
+    object_property_set_uint(cpu_obj, "rvbar", bootrom_base, &error_fatal);
 
     // Ensure all exception levels are enabled by default
     object_property_set_bool(cpu_obj, "has_el3", true, &error_fatal);
     object_property_set_bool(cpu_obj, "has_el2", true, &error_fatal);
 
-    // Set timer freqency
+    // Set timer freqency (TODO: ensure this gets set properly...)
     object_property_set_int(cpu_obj, "cntfrq", 62500000, &error_fatal);
 
     // Realize the CPU
@@ -204,13 +212,14 @@ static void helix_flash_init(MachineState *ms) {
 static void helix_sdhci_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     DriveInfo *dinfo = drive_get(IF_SD, 0, 0);
+    hwaddr mmc_base = helix_memmap[HELIX_EMMC].base;
 
 
 
     object_initialize_child(OBJECT(m), "sdhost", &m->sdhost, TYPE_CADENCE_SDHCI);
 
     sysbus_realize(SYS_BUS_DEVICE(&m->sdhost), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&m->sdhost), 0, helix_memmap[HELIX_EMMC].base);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&m->sdhost), 0, mmc_base);
 
     sysbus_connect_irq(SYS_BUS_DEVICE(&m->sdhost), 0, qdev_get_gpio_in(DEVICE(m->gic), 61));
 
@@ -238,35 +247,38 @@ static void helix_fw_cfg_init(MachineState *ms) {
     rom_set_fw(m->fw_cfg);
 }
 
-static void helix_ramfb_init(MachineState *ms) {
-    HelixMachineState *m = HELIX_MACHINE(ms);
-
-    // Initialize framebuffer
-    MemoryRegion *fb = g_new(MemoryRegion, 1);
-    memory_region_init_ram(fb, NULL, "helix.ramfb", helix_memmap[HELIX_FB].size, &error_fatal);
-    memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_FB].base, fb);
-}
-
 static void helix_board_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
+    hwaddr sram_base = helix_memmap[HELIX_SRAM].base;
+    hwaddr dram_base = helix_memmap[HELIX_DRAM].base;
+    hwaddr ramfb_base = helix_memmap[HELIX_FB].base;
+    size_t sram_size = helix_memmap[HELIX_SRAM].size;
+    size_t dram_size = helix_memmap[HELIX_DRAM].size;
+    size_t ramfb_size = helix_memmap[HELIX_FB].size;
+
+
 
     m->sysmem = get_system_memory();
 
     // Initialize SRAM
     MemoryRegion *sram = g_new(MemoryRegion, 1);
-    memory_region_init_ram(sram, NULL, "helix.sram", helix_memmap[HELIX_SRAM].size, &error_fatal);
-    memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_SRAM].base, sram);
+    memory_region_init_ram(sram, NULL, "helix.sram", sram_size, &error_fatal);
+    memory_region_add_subregion(m->sysmem, sram_base, sram);
 
     // Initialize DRAM
     MemoryRegion *dram = g_new(MemoryRegion, 1);
-    memory_region_init_ram(dram, NULL, "helix.dram", helix_memmap[HELIX_DRAM].size, &error_fatal);
-    memory_region_add_subregion(m->sysmem, helix_memmap[HELIX_DRAM].base, dram);
+    memory_region_init_ram(dram, NULL, "helix.dram", dram_size, &error_fatal);
+    memory_region_add_subregion(m->sysmem, dram_base, dram);
+
+    // Initialize framebuffer
+    MemoryRegion *fb = g_new(MemoryRegion, 1);
+    memory_region_init_ram(fb, NULL, "helix.ramfb", ramfb_size, &error_fatal);
+    memory_region_add_subregion(m->sysmem, ramfb_base, fb);
 
     // Initialize devices
     helix_cpu_init(ms);
     helix_gic_init(ms);
     helix_fw_cfg_init(ms);
-    helix_ramfb_init(ms);
     helix_uart_init(ms);
     helix_flash_init(ms);
     helix_sdhci_init(ms);
@@ -282,6 +294,7 @@ static void helix_board_class_init(ObjectClass *oc, const void *data) {
     mc->max_cpus = 1;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a57");
     
+    // NOTE: May be changed dynamically with "-m <ram size>"
     mc->default_ram_size = HELIX_DRAM_SIZE;
 
     machine_class_allow_dynamic_sysbus_dev(mc, TYPE_RAMFB_DEVICE);
