@@ -35,6 +35,9 @@
 #include "standard-headers/drm/drm_fourcc.h"
 #include "hw/display/framebuffer.h"
 #include "libfdt.h"
+#include "hw/usb/hcd-ehci.h"
+
+
 
 
 
@@ -62,11 +65,13 @@
 static const MemMapEntry helix_memmap[] = {
     [HELIX_ROM]     = {HELIX_ROM_BASE, HELIX_ROM_SIZE},
     [HELIX_SRAM]    = {HELIX_SRAM_BASE, HELIX_SRAM_SIZE},
+    [HELIX_NOR]     = {HELIX_NOR_BASE, HELIX_NOR_SIZE},
     [HELIX_UART0]   = {HELIX_UART_BASE, HELIX_UART_SIZE},
     [HELIX_GICD]    = {HELIX_GICD_BASE, HELIX_GICD_SIZE},
     [HELIX_GICR]    = {HELIX_GICR_BASE, HELIX_GICR_SIZE},
     [HELIX_EMMC]    = {HELIX_SDHCI_BASE, HELIX_SDHCI_SIZE},
     [HELIX_FW_CFG]  = {HELIX_FW_CFG_BASE, HELIX_FW_CFG_SIZE},
+    [HELIX_USB]     = {HELIX_USB_BASE, HELIX_USB_SIZE},
     [HELIX_DRAM]    = {HELIX_DRAM_BASE, HELIX_DRAM_SIZE},
     [HELIX_FB]      = {HELIX_FRAMEBUFFER_BASE, HELIX_FRAMEBUFFER_SIZE}
 };
@@ -188,7 +193,7 @@ static void helix_cpu_init(MachineState *ms) {
     cpu_address_space_init(m->cs, 0, "cpu-memory", m->sysmem);
 }
 
-static void helix_flash_init(MachineState *ms) {
+static void helix_bootrom_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     DriveInfo *dinfo;
     DeviceState *flash;
@@ -197,7 +202,8 @@ static void helix_flash_init(MachineState *ms) {
 
     qdev_prop_set_uint64(flash, "sector-length", 64 * KiB);
     qdev_prop_set_uint64(flash, "num-blocks", 1);
-    qdev_prop_set_uint32(flash, "width", 1);
+    qdev_prop_set_uint8(flash, "width", 4);
+    qdev_prop_set_uint8(flash, "device-width", 4);
     qdev_prop_set_string(flash, "name", "helix.bootrom");
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
@@ -207,6 +213,30 @@ static void helix_flash_init(MachineState *ms) {
     sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, helix_memmap[HELIX_ROM].base);
 
     m->bootrom = PFLASH_CFI01(flash);
+}
+
+static void helix_nor_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+    DriveInfo *dinfo;
+    DeviceState *flash;
+
+    flash = qdev_new("cfi.pflash01");
+
+    // TODO: Use size definition
+    qdev_prop_set_uint64(flash, "sector-length",HELIX_NOR_ERASE_SIZE);
+    qdev_prop_set_uint64(flash, "num-blocks", HELIX_NOR_NUM_BLOCKS);
+    qdev_prop_set_uint8(flash, "width", 4);
+    qdev_prop_set_uint8(flash, "device-width", 4);
+    qdev_prop_set_string(flash, "name", "helix.nor");
+
+    // NOTE: Unit is index. 0 = index 0, 1 = index 1
+    dinfo = drive_get(IF_PFLASH, 0, 1);
+    qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(flash), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, helix_memmap[HELIX_NOR].base);
+
+    m->nor = PFLASH_CFI01(flash);
 }
 
 static void helix_sdhci_init(MachineState *ms) {
@@ -228,6 +258,21 @@ static void helix_sdhci_init(MachineState *ms) {
 
     qdev_prop_set_drive_err(mmc, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
     qdev_realize_and_unref(mmc, sdhci->bus, &error_fatal);
+}
+
+static void helix_usb_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+    hwaddr usb_base = helix_memmap[HELIX_USB].base;
+
+
+
+    m->usb = qdev_new(TYPE_PLATFORM_EHCI);
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(m->usb), &error_fatal);
+
+    sysbus_mmio_map(SYS_BUS_DEVICE(m->usb), 0, usb_base);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(m->usb), 0, qdev_get_gpio_in(DEVICE(m->gic), 62));
 }
 
 static void helix_fw_cfg_init(MachineState *ms) {
@@ -280,8 +325,10 @@ static void helix_board_init(MachineState *ms) {
     helix_gic_init(ms);
     helix_fw_cfg_init(ms);
     helix_uart_init(ms);
-    helix_flash_init(ms);
+    helix_bootrom_init(ms);
     helix_sdhci_init(ms);
+    helix_nor_init(ms);
+    helix_usb_init(ms);
 }
 
 static void helix_board_class_init(ObjectClass *oc, const void *data) {
