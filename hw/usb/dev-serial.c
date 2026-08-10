@@ -135,18 +135,18 @@ static const USBDescIface desc_iface0 = {
         {
             .bEndpointAddress      = USB_DIR_IN | 0x01,
             .bmAttributes          = USB_ENDPOINT_XFER_BULK,
-            .wMaxPacketSize        = 64,
+            .wMaxPacketSize        = 512,
         },{
             .bEndpointAddress      = USB_DIR_OUT | 0x02,
             .bmAttributes          = USB_ENDPOINT_XFER_BULK,
-            .wMaxPacketSize        = 64,
+            .wMaxPacketSize        = 512,
         },
     }
 };
 
 static const USBDescDevice desc_device = {
     .bcdUSB                        = 0x0200,
-    .bMaxPacketSize0               = 8,
+    .bMaxPacketSize0               = 64,
     .bNumConfigurations            = 1,
     .confs = (USBDescConfig[]) {
         {
@@ -169,7 +169,7 @@ static const USBDesc desc_serial = {
         .iProduct          = STR_PRODUCT_SERIAL,
         .iSerialNumber     = STR_SERIALNUMBER,
     },
-    .full = &desc_device,
+    .high = &desc_device,
     .str  = desc_strings,
 };
 
