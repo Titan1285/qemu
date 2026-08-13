@@ -35,7 +35,8 @@
 #include "standard-headers/drm/drm_fourcc.h"
 #include "hw/display/framebuffer.h"
 #include "libfdt.h"
-#include "hw/usb/hcd-ehci.h"
+#include "hw/usb/hcd-xhci.h"
+#include "hw/usb/hcd-xhci-sysbus.h"
 
 
 
@@ -266,7 +267,10 @@ static void helix_usb_init(MachineState *ms) {
 
 
 
-    m->usb = qdev_new(TYPE_PLATFORM_EHCI);
+    m->usb = qdev_new(TYPE_XHCI_SYSBUS);
+
+    qdev_prop_set_uint32(m->usb, "intrs", 1);
+    qdev_prop_set_uint32(m->usb, "slots", 8);
 
     sysbus_realize_and_unref(SYS_BUS_DEVICE(m->usb), &error_fatal);
 
