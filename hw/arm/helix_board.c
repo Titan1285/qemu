@@ -37,6 +37,8 @@
 #include "libfdt.h"
 #include "hw/usb/hcd-xhci.h"
 #include "hw/usb/hcd-xhci-sysbus.h"
+#include "hw/watchdog/sbsa_gwdt.h"
+
 
 
 
@@ -73,6 +75,7 @@ static const MemMapEntry helix_memmap[] = {
     [HELIX_EMMC]    = {HELIX_SDHCI_BASE, HELIX_SDHCI_SIZE},
     [HELIX_FW_CFG]  = {HELIX_FW_CFG_BASE, HELIX_FW_CFG_SIZE},
     [HELIX_USB]     = {HELIX_USB_BASE, HELIX_USB_SIZE},
+    [HELIX_WDT]     = {HELIX_WDT_BASE, HELIX_WDT_SIZE},
     [HELIX_DRAM]    = {HELIX_DRAM_BASE, HELIX_DRAM_SIZE},
     [HELIX_FB]      = {HELIX_FRAMEBUFFER_BASE, HELIX_FRAMEBUFFER_SIZE}
 };
@@ -161,7 +164,7 @@ static void helix_uart_init(MachineState *ms) {
 
     sysbus_mmio_map(m->pl011_bus, 0, helix_memmap[HELIX_UART0].base);
 
-    sysbus_connect_irq(m->pl011_bus, 0, qdev_get_gpio_in(DEVICE(m->gic), 32));
+    sysbus_connect_irq(m->pl011_bus, 0, qdev_get_gpio_in(DEVICE(m->gic), HELIX_IRQ_UART));
 }
 
 static void helix_cpu_init(MachineState *ms) {
@@ -198,20 +201,24 @@ static void helix_bootrom_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     DriveInfo *dinfo;
     DeviceState *flash;
+    hwaddr rom_base = helix_memmap[HELIX_ROM].base;
+
 
     flash = qdev_new("cfi.pflash01");
 
-    qdev_prop_set_uint64(flash, "sector-length", 64 * KiB);
-    qdev_prop_set_uint64(flash, "num-blocks", 1);
-    qdev_prop_set_uint8(flash, "width", 4);
-    qdev_prop_set_uint8(flash, "device-width", 4);
-    qdev_prop_set_string(flash, "name", "helix.bootrom");
+    qdev_prop_set_uint64(flash, "sector-length", 4 * KiB);  // 4KB sector size
+    qdev_prop_set_uint64(flash, "num-blocks", 16);          // 4KB * 16 = 64KB
+    qdev_prop_set_uint8(flash, "width", 4);                 // 32-bit bus width
+    qdev_prop_set_uint8(flash, "device-width", 4);          // 32-bit chip width
+    
+    qdev_prop_set_bit(flash, "big-endian", false);          // Little-endian
+    qdev_prop_set_string(flash, "name", "helix.bootrom");   // Device name
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
 
     sysbus_realize_and_unref(SYS_BUS_DEVICE(flash), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, helix_memmap[HELIX_ROM].base);
+    sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, rom_base);
 
     m->bootrom = PFLASH_CFI01(flash);
 }
@@ -220,22 +227,25 @@ static void helix_nor_init(MachineState *ms) {
     HelixMachineState *m = HELIX_MACHINE(ms);
     DriveInfo *dinfo;
     DeviceState *flash;
+    hwaddr nor_base = helix_memmap[HELIX_NOR].base;
+
 
     flash = qdev_new("cfi.pflash01");
 
-    // TODO: Use size definition
-    qdev_prop_set_uint64(flash, "sector-length",HELIX_NOR_ERASE_SIZE);
-    qdev_prop_set_uint64(flash, "num-blocks", HELIX_NOR_NUM_BLOCKS);
-    qdev_prop_set_uint8(flash, "width", 4);
-    qdev_prop_set_uint8(flash, "device-width", 4);
-    qdev_prop_set_string(flash, "name", "helix.nor");
+    qdev_prop_set_uint64(flash, "sector-length", 4 * KiB);  // 4KB sector size
+    qdev_prop_set_uint64(flash, "num-blocks", 512);         // 4KB * 512 = 2MB
+    qdev_prop_set_uint8(flash, "width", 4);                 // 32-bit bus width
+    qdev_prop_set_uint8(flash, "device-width", 4);          // 32-bit chip width
+    
+    qdev_prop_set_bit(flash, "big-endian", false);          // Little-endian
+    qdev_prop_set_string(flash, "name", "helix.nor");       // Device name
 
     // NOTE: Unit is index. 0 = index 0, 1 = index 1
     dinfo = drive_get(IF_PFLASH, 0, 1);
     qdev_prop_set_drive_err(flash, "drive", blk_by_legacy_dinfo(dinfo), &error_fatal);
 
     sysbus_realize_and_unref(SYS_BUS_DEVICE(flash), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, helix_memmap[HELIX_NOR].base);
+    sysbus_mmio_map(SYS_BUS_DEVICE(flash), 0, nor_base);
 
     m->nor = PFLASH_CFI01(flash);
 }
@@ -252,7 +262,7 @@ static void helix_sdhci_init(MachineState *ms) {
     sysbus_realize(SYS_BUS_DEVICE(&m->sdhost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&m->sdhost), 0, mmc_base);
 
-    sysbus_connect_irq(SYS_BUS_DEVICE(&m->sdhost), 0, qdev_get_gpio_in(DEVICE(m->gic), 61));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&m->sdhost), 0, qdev_get_gpio_in(DEVICE(m->gic), HELIX_IRQ_SDHCI));
 
     CadenceSDHCIState *sdhci = &(m->sdhost);
     DeviceState *mmc = qdev_new(TYPE_SD_CARD);
@@ -276,7 +286,7 @@ static void helix_usb_init(MachineState *ms) {
 
     sysbus_mmio_map(SYS_BUS_DEVICE(m->usb), 0, usb_base);
 
-    sysbus_connect_irq(SYS_BUS_DEVICE(m->usb), 0, qdev_get_gpio_in(DEVICE(m->gic), 62));
+    sysbus_connect_irq(SYS_BUS_DEVICE(m->usb), 0, qdev_get_gpio_in(DEVICE(m->gic), HELIX_IRQ_XHCI));
 }
 
 static void helix_fw_cfg_init(MachineState *ms) {
@@ -294,6 +304,23 @@ static void helix_fw_cfg_init(MachineState *ms) {
 
     // TODO: Verify if this is needed...?
     rom_set_fw(m->fw_cfg);
+}
+
+static void helix_wdt_init(MachineState *ms) {
+    HelixMachineState *m = HELIX_MACHINE(ms);
+    hwaddr refresh_frame = helix_memmap[HELIX_WDT].base;
+    hwaddr ctrl_frame = refresh_frame + 0x1000;
+
+
+
+    m->wdt = qdev_new(TYPE_WDT_SBSA);
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(m->wdt), &error_fatal);
+
+    sysbus_mmio_map(SYS_BUS_DEVICE(m->wdt), 0, refresh_frame);
+    sysbus_mmio_map(SYS_BUS_DEVICE(m->wdt), 1, ctrl_frame);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(m->wdt), 0, qdev_get_gpio_in(DEVICE(m->gic), HELIX_IRQ_WDT));
 }
 
 static void helix_board_init(MachineState *ms) {
@@ -333,6 +360,7 @@ static void helix_board_init(MachineState *ms) {
     helix_sdhci_init(ms);
     helix_nor_init(ms);
     helix_usb_init(ms);
+    helix_wdt_init(ms);
 }
 
 static void helix_board_class_init(ObjectClass *oc, const void *data) {
