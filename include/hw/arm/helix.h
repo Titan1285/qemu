@@ -45,15 +45,19 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixFramebufferState, HELIX_RAMFB)
 
 
 
+
 #define HELIX_ROM_BASE      0x00000000
 #define HELIX_ROM_SIZE      0x10000     // 64KB
 
 #define HELIX_SRAM_BASE     0x00010000
 #define HELIX_SRAM_SIZE     0x80000     // 512KB
 
-#define HELIX_MMIO_BASE     0x01000000
+#define HELIX_NOR_BASE      0x00100000
+#define HELIX_NOR_SIZE      0x200000    // 2MB
 
-#define HELIX_UART_BASE     (HELIX_MMIO_BASE + 0x000000)
+#define HELIX_MMIO_BASE     0x02000000
+
+#define HELIX_UART_BASE     HELIX_MMIO_BASE
 #define HELIX_UART_SIZE     0x1000      // 4KB
 
 #define HELIX_GICD_BASE     (HELIX_MMIO_BASE + 0x010000)
@@ -71,11 +75,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixFramebufferState, HELIX_RAMFB)
 #define HELIX_USB_BASE      (HELIX_MMIO_BASE + 0x060000)
 #define HELIX_USB_SIZE      0x2000      // 64KB
 
-#define HELIX_DRAM_BASE     0x40000000
-#define HELIX_DRAM_SIZE     0x3FFF0000 // 1GB (minus 16MB for framebuffer)
+#define HELIX_WDT_BASE      (HELIX_MMIO_BASE + 0x080000)
+#define HELIX_WDT_SIZE      0x2000      // 64KB
 
-#define HELIX_FRAMEBUFFER_BASE  0x7FFF0000
-#define HELIX_FRAMEBUFFER_SIZE  (16 * MiB)
+#define HELIX_DRAM_BASE     0x40000000
+#define HELIX_DRAM_SIZE     0x3F000000  // 1GB (minus 16MB for framebuffer)
+
+#define HELIX_FRAMEBUFFER_BASE  0x7F000000
+#define HELIX_FRAMEBUFFER_SIZE  0x1000000  // 16MB
 
 
 
@@ -83,19 +90,29 @@ OBJECT_DECLARE_SIMPLE_TYPE(HelixFramebufferState, HELIX_RAMFB)
 enum {
     HELIX_ROM       = 0,
     HELIX_SRAM      = 1,
-    HELIX_UART0     = 2,
-    HELIX_GICD      = 3,
-    HELIX_GICR      = 4,
-    HELIX_EMMC      = 5,
-    HELIX_FW_CFG    = 6,
-    HELIX_DRAM      = 7,
-    HELIX_FB        = 8
+    HELIX_NOR       = 2,
+    HELIX_UART0     = 3,
+    HELIX_GICD      = 4,
+    HELIX_GICR      = 5,
+    HELIX_EMMC      = 6,
+    HELIX_FW_CFG    = 7,
+    HELIX_USB       = 8,
+    HELIX_WDT       = 9,
+    HELIX_DRAM      = 10,
+    HELIX_FB        = 11
 };
 
 // IRQ's 16-32 for Private Peripheral IRQ's (like Generic Timer, etc), 32 - 1019 is for Shared Peripheral IRQ's (like UART, etc), 0 - 15 is for SGI's
+
 enum {
-    HELIX_UART_IRQ              = 32,
-    HELIX_SECURE_TIMER_PHYS_IRQ = 29
+    // Private Peripheral IRQ's
+    HELIX_IRQ_WDT               = 27,
+    HELIX_SECURE_TIMER_PHYS_IRQ = 29,
+    HELIX_IRQ_UART              = 32,
+
+    // Shared Peripheral IRQ's
+    HELIX_IRQ_SDHCI             = 61,
+    HELIX_IRQ_XHCI              = 62
 };
 
 struct RAMFBCfg {
@@ -116,22 +133,27 @@ typedef struct HelixMachineState {
     MachineState        parent;
     ARMCPU              *cpu;
     CPUState            *cs;
+
     PFlashCFI01         *bootrom;
+    PFlashCFI01         *nor;
 
     DeviceState         *gic;
     SysBusDevice        *gic_bus;
 
+    DeviceState         *usb;
+
     DeviceState         *pl011;
     SysBusDevice        *pl011_bus;
 
-    CadenceSDHCIState   sdhost;
+    CadenceSDHCIState   sdhost;         // SDHCI EMMC host
     DeviceState         *plic;
 
-    FWCfgState          *fw_cfg;
+    DeviceState         *wdt;           // Watchdog timer
 
-    QemuConsole         *con;
-    MemoryRegion        *fb_mem;
-    RAMFBState          *ramfb;
+    FWCfgState          *fw_cfg;        // Firware config
+
+    MemoryRegion        *fb_mem;        // Framebuffer memory region
+    RAMFBState          *ramfb;         // Ram framebuffer state
 
     MemoryRegion        *sysmem;        // Non-secure system memory
     MemoryRegion        *sec_sysmem;    // Secure system memory (currently unused)
