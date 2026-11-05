@@ -9,7 +9,6 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/arm/boot.h"
-#include "hw/arm/machines-qom.h"
 #include "hw/arm/aspeed.h"
 #include "hw/arm/aspeed_soc.h"
 #include "hw/core/qdev-clock.h"
@@ -76,12 +75,34 @@ static void aspeed_machine_ast1040_evb_class_init(ObjectClass *oc,
     aspeed_machine_class_init_cpus_defaults(mc);
 }
 
+static void aspeed_machine_ast1080_evb_class_init(ObjectClass *oc,
+                                                  const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    AspeedMachineClass *amc = ASPEED_MACHINE_CLASS(oc);
+
+    mc->desc = "Aspeed AST1080 Platform Root of Trust (Cortex-M4)";
+    amc->soc_name = "ast1080-a0";
+    amc->hw_strap1 = 0;
+    amc->hw_strap2 = 0;
+    mc->init = aspeed_bic_machine_init;
+    amc->i2c_init = ast1040_evb_i2c_init;
+    mc->default_ram_size = 0;
+    amc->macs_mask = 0;
+    amc->uart_default = ASPEED_DEV_UART12;
+    aspeed_machine_class_init_cpus_defaults(mc);
+}
+
 static const TypeInfo aspeed_ast1040_evb_types[] = {
     {
         .name           = MACHINE_TYPE_NAME("ast1040-evb"),
         .parent         = TYPE_ASPEED_MACHINE,
         .class_init     = aspeed_machine_ast1040_evb_class_init,
-        .interfaces     = arm_machine_interfaces,
+    },
+    {
+        .name           = MACHINE_TYPE_NAME("ast1080-evb"),
+        .parent         = TYPE_ASPEED_MACHINE,
+        .class_init     = aspeed_machine_ast1080_evb_class_init,
     }
 };
 

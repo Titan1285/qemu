@@ -20,6 +20,7 @@
 #include "cpu.h"
 #include "fma_emu.h"
 #include "arch.h"
+#include "internal.h"
 #include "macros.h"
 
 #define SF_BIAS        127
@@ -199,6 +200,10 @@ void arch_fpop_start(CPUHexagonState *env)
     set_float_rounding_mode(
         softfloat_roundingmodes[fREAD_REG_FIELD(USR, USR_FPRND)],
         &env->fp_status);
+    /*
+     * No need to check env->hvx_fp_status, these instructions don't
+     * raise exceptions nor interact with usr fields.
+     */
 }
 
 #ifdef CONFIG_USER_ONLY
@@ -209,10 +214,14 @@ void arch_fpop_start(CPUHexagonState *env)
  */
 #define RAISE_FP_EXCEPTION   do {} while (0)
 #else
- /*
-  * To be implemented.
-  */
-#define RAISE_FP_EXCEPTION   do { g_assert_not_reached(); } while (0)
+#define RAISE_FP_EXCEPTION \
+    do { \
+        CPUState *cs = env_cpu(env); \
+        cs->exception_index = HEX_EVENT_FPTRAP; \
+        env->cause_code = HEX_CAUSE_FPTRAP_CAUSE_BADFLOAT; \
+        do_raise_exception(env, cs->exception_index, \
+                           env->gpr[HEX_REG_PC], 0); \
+    } while (0)
 #endif
 
 #define SOFTFLOAT_TEST_FLAG(FLAG, MYF, MYE) \
@@ -237,6 +246,10 @@ void arch_fpop_end(CPUHexagonState *env, bool pkt_need_commit)
         SOFTFLOAT_TEST_FLAG(float_flag_overflow, FPOVFF, FPOVFE);
         SOFTFLOAT_TEST_FLAG(float_flag_underflow, FPUNFF, FPUNFE);
     }
+    /*
+     * No need to check env->hvx_fp_status, these instructions don't
+     * raise exceptions nor interact with usr fields.
+     */
 }
 
 int arch_sf_recip_common(float32 *Rs, float32 *Rt, float32 *Rd, int *adjust,

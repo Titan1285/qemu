@@ -26,6 +26,7 @@
 #include "hw/mem/nvdimm.h"
 #include "hw/mem/memory-device.h"
 #include "qapi/error.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/visitor.h"
 #include "qemu/module.h"
 #include "system/hostmem.h"
@@ -103,7 +104,7 @@ static int pc_dimm_slot2bitmap(Object *obj, void *opaque)
 
     if (object_dynamic_cast(obj, TYPE_PC_DIMM)) {
         DeviceState *dev = DEVICE(obj);
-        if (dev->realized) { /* count only realized DIMMs */
+        if (qdev_is_realized(dev)) { /* count only realized DIMMs */
             PCDIMMDevice *d = PC_DIMM(obj);
             set_bit(d->slot, bitmap);
         }
@@ -176,7 +177,8 @@ static void pc_dimm_get_size(Object *obj, Visitor *v, const char *name,
 
 static void pc_dimm_init(Object *obj)
 {
-    object_property_add(obj, PC_DIMM_SIZE_PROP, "uint64", pc_dimm_get_size,
+    object_property_add(obj, PC_DIMM_SIZE_PROP, "uint64", &uint64_type_info,
+                        pc_dimm_get_size,
                         NULL, NULL, NULL);
 }
 

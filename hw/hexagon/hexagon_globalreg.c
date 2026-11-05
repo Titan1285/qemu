@@ -11,11 +11,14 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/resettable.h"
+#include "hw/intc/hex-l2vic.h"
+#include "hw/timer/qct-qtimer.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "target/hexagon/cpu.h"
 #include "target/hexagon/hex_regs.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "trace.h"
 #include "qapi/error.h"
 
@@ -82,6 +85,11 @@ static const char *hex_sreg_names[] = {
     [HEX_SREG_S61] = "s61",
     [HEX_SREG_S62] = "s62",
     [HEX_SREG_S63] = "s63",
+    [HEX_SREG_IPEND] = "ipend",
+    [HEX_SREG_IAD] = "iad",
+    [HEX_SREG_ISDBST1] = "isdbst1",
+    [HEX_SREG_ISDBST2] = "isdbst2",
+    [HEX_SREG_BRKPTINFO1] = "brkptinfo1",
 };
 
 static const char *get_sreg_name(uint32_t reg)
@@ -98,6 +106,8 @@ static const uint32_t global_sreg_immut_masks[NUM_SREGS] = {
     [HEX_SREG_MODECTL] = IMMUTABLE,
     [HEX_SREG_SYSCFG] = 0x80001c00,
     [HEX_SREG_IPENDAD] = IMMUTABLE,
+    [HEX_SREG_IPEND] = IMMUTABLE,
+    [HEX_SREG_IAD] = IMMUTABLE,
     [HEX_SREG_VID] = 0xfc00fc00,
     [HEX_SREG_VID1] = 0xfc00fc00,
     [HEX_SREG_BESTWAIT] = 0xfffffe00,
@@ -107,6 +117,9 @@ static const uint32_t global_sreg_immut_masks[NUM_SREGS] = {
     [HEX_SREG_DIAG] = 0x00000000,
     [HEX_SREG_REV] = IMMUTABLE,
     [HEX_SREG_ISDBST] = IMMUTABLE,
+    [HEX_SREG_ISDBST1] = IMMUTABLE,
+    [HEX_SREG_ISDBST2] = IMMUTABLE,
+    [HEX_SREG_BRKPTINFO1] = IMMUTABLE,
     [HEX_SREG_ISDBCFG0] = 0xe0000000,
     [HEX_SREG_BRKPTPC0] = 0x00000003,
     [HEX_SREG_BRKPTCFG0] = 0xfc007000,
@@ -135,6 +148,144 @@ static inline uint32_t apply_write_mask(uint32_t new_val, uint32_t cur_val,
     return new_val;
 }
 
+static inline bool is_vid_reg(uint32_t reg)
+{
+    return reg == HEX_SREG_VID || reg == HEX_SREG_VID1;
+}
+
+static inline bool is_timer_reg(uint32_t reg)
+{
+    return reg == HEX_SREG_TIMERLO || reg == HEX_SREG_TIMERHI;
+}
+
+static inline bool is_pcycle_reg(uint32_t reg)
+{
+    return reg == HEX_SREG_PCYCLELO || reg == HEX_SREG_PCYCLEHI;
+}
+
+static inline bool modectl_any_thread_running(uint32_t modectl)
+{
+    uint32_t enabled = modectl & 0xffff;
+    uint32_t waiting = modectl >> 16;
+    return (enabled & ~waiting) != 0;
+}
+
+static uint64_t pcycle_value_now(HexagonGlobalRegState *s)
+{
+    uint64_t cycles = s->g_pcycle_base;
+
+    if (s->pcycle_running) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        int64_t elapsed = now - s->pcycle_start_ns;
+
+        if (elapsed > 0) {
+            cycles += elapsed;
+        }
+    }
+    return cycles;
+}
+
+static void pcycle_fold(HexagonGlobalRegState *s)
+{
+    int64_t now;
+    int64_t elapsed;
+
+    if (!s->pcycle_running) {
+        return;
+    }
+
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    elapsed = now - s->pcycle_start_ns;
+    if (elapsed > 0) {
+        s->g_pcycle_base += elapsed;
+    }
+    s->pcycle_start_ns = now;
+}
+
+static bool pcycle_enabled(uint32_t syscfg)
+{
+    return extract32(syscfg, reg_field_info[SYSCFG_PCYCLEEN].offset,
+                     reg_field_info[SYSCFG_PCYCLEEN].width);
+}
+
+uint64_t hexagon_globalreg_read_pcycle(HexagonGlobalRegState *s)
+{
+    g_assert(s);
+    return pcycle_enabled(s->regs[HEX_SREG_SYSCFG]) ?
+           pcycle_value_now(s) : 0;
+}
+static void pcycle_set_running(HexagonGlobalRegState *s, bool running)
+{
+    if (running == s->pcycle_running) {
+        return;
+    }
+    if (running) {
+        s->pcycle_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    } else {
+        s->g_pcycle_base = pcycle_value_now(s);
+    }
+    s->pcycle_running = running;
+    trace_hexagon_pcycle_run_state(s->pcycle_running, s->g_pcycle_base);
+}
+
+static void pcycle_write(HexagonGlobalRegState *s, uint32_t reg,
+                         uint32_t value)
+{
+    pcycle_fold(s);
+    s->g_pcycle_base = deposit64(s->g_pcycle_base,
+                                 reg == HEX_SREG_PCYCLELO ? 0 : 32, 32,
+                                 value);
+}
+
+static uint32_t get_reg_value(HexagonGlobalRegState *s, uint32_t reg)
+{
+    if (is_vid_reg(reg)) {
+        return l2vic_read_vid(s->l2vic, reg == HEX_SREG_VID ? 0 : 1);
+    }
+    if (is_timer_reg(reg)) {
+        return reg == HEX_SREG_TIMERLO ?
+                qct_qtimer_get_timer_lo(s->qtimer) :
+                qct_qtimer_get_timer_hi(s->qtimer);
+    }
+    if (is_pcycle_reg(reg)) {
+        uint64_t value = hexagon_globalreg_read_pcycle(s);
+        return reg == HEX_SREG_PCYCLELO ?
+                (uint32_t)value : (uint32_t)(value >> 32);
+    }
+    return qatomic_read(&s->regs[reg]);
+}
+
+static void set_reg_value(HexagonGlobalRegState *s, uint32_t reg,
+                          uint32_t value)
+{
+    bool pcycle_enable = reg == HEX_SREG_SYSCFG &&
+        !pcycle_enabled(s->regs[reg]) && pcycle_enabled(value);
+
+    if (is_pcycle_reg(reg)) {
+        pcycle_write(s, reg, value);
+        return;
+    }
+
+    qatomic_set(&s->regs[reg], value);
+    if (pcycle_enable) {
+        s->g_pcycle_base = 0;
+        if (s->pcycle_running) {
+            s->pcycle_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        }
+    }
+    if (is_vid_reg(reg)) {
+        l2vic_update_vid(s->l2vic, reg == HEX_SREG_VID ? 0 : 1, value);
+    }
+    if (reg == HEX_SREG_MODECTL) {
+        pcycle_set_running(s, modectl_any_thread_running(value));
+    }
+}
+
+uint32_t hexagon_globalreg_read_syscfg_unlocked(HexagonGlobalRegState *s)
+{
+    return s ? qatomic_read(&s->regs[HEX_SREG_SYSCFG]) : 0;
+}
+
 uint32_t hexagon_globalreg_read(HexagonGlobalRegState *s, uint32_t reg,
                                 uint32_t htid)
 {
@@ -146,7 +297,7 @@ uint32_t hexagon_globalreg_read(HexagonGlobalRegState *s, uint32_t reg,
     g_assert(reg < NUM_SREGS);
     g_assert(reg >= HEX_SREG_GLB_START);
 
-    value = s->regs[reg];
+    value = get_reg_value(s, reg);
 
     trace_hexagon_globalreg_read(htid, get_sreg_name(reg), value);
     return value;
@@ -160,7 +311,7 @@ void hexagon_globalreg_write(HexagonGlobalRegState *s, uint32_t reg,
     }
     g_assert(reg < NUM_SREGS);
     g_assert(reg >= HEX_SREG_GLB_START);
-    s->regs[reg] = value;
+    set_reg_value(s, reg, value);
     trace_hexagon_globalreg_write(htid, get_sreg_name(reg), value);
 }
 
@@ -168,6 +319,7 @@ uint32_t hexagon_globalreg_masked_value(HexagonGlobalRegState *s, uint32_t reg,
                                         uint32_t value)
 {
     uint32_t reg_mask;
+    uint32_t cur_val;
 
     if (!s) {
         return value;
@@ -175,9 +327,10 @@ uint32_t hexagon_globalreg_masked_value(HexagonGlobalRegState *s, uint32_t reg,
     g_assert(reg < NUM_SREGS);
     g_assert(reg >= HEX_SREG_GLB_START);
     reg_mask = global_sreg_immut_masks[reg];
+    cur_val = get_reg_value(s, reg);
     return reg_mask == IMMUTABLE ?
-            s->regs[reg] :
-            apply_write_mask(value, s->regs[reg], reg_mask);
+            cur_val :
+            apply_write_mask(value, cur_val, reg_mask);
 }
 
 void hexagon_globalreg_write_masked(HexagonGlobalRegState *s, uint32_t reg,
@@ -186,7 +339,7 @@ void hexagon_globalreg_write_masked(HexagonGlobalRegState *s, uint32_t reg,
     if (!s) {
         return;
     }
-    s->regs[reg] = hexagon_globalreg_masked_value(s, reg, value);
+    set_reg_value(s, reg, hexagon_globalreg_masked_value(s, reg, value));
 }
 
 uint64_t hexagon_globalreg_get_pcycle_base(HexagonGlobalRegState *s)
@@ -210,6 +363,7 @@ static void do_hexagon_globalreg_reset(HexagonGlobalRegState *s)
     memset(s->regs, 0, sizeof(s->regs));
 
     s->g_pcycle_base = 0;
+    s->pcycle_running = false;
 
     s->regs[HEX_SREG_EVB] = s->boot_evb;
     s->regs[HEX_SREG_CFGBASE] = HEXAGON_CFG_ADDR_BASE(s->config_table_addr);
@@ -229,6 +383,8 @@ static void do_hexagon_globalreg_reset(HexagonGlobalRegState *s)
     }
     s->regs[HEX_SREG_ISDBEN] = isdben_val;
     s->regs[HEX_SREG_MODECTL] = 0x1;
+    pcycle_set_running(s,
+                       modectl_any_thread_running(s->regs[HEX_SREG_MODECTL]));
 
     /*
      * These register indices are placeholders in these arrays
@@ -256,10 +412,48 @@ static void hexagon_globalreg_reset_hold(Object *obj, ResetType type)
     do_hexagon_globalreg_reset(s);
 }
 
+static void hexagon_globalreg_realize(DeviceState *dev, Error **errp)
+{
+    HexagonGlobalRegState *s = HEXAGON_GLOBALREG(dev);
+
+    if (!s->l2vic) {
+        error_setg(errp, "hexagon_globalreg: 'l2vic' link property not set");
+        return;
+    }
+    if (!s->qtimer) {
+        error_setg(errp, "hexagon_globalreg: 'qtimer' link property not set");
+        return;
+    }
+}
+
+static int hexagon_globalreg_pre_save(void *opaque)
+{
+    HexagonGlobalRegState *s = opaque;
+
+    /* Migrate a stable value, not a timestamp from the source clock. */
+    pcycle_fold(s);
+    return 0;
+}
+
+static int hexagon_globalreg_post_load(void *opaque,
+                                       int version_id G_GNUC_UNUSED)
+{
+    HexagonGlobalRegState *s = opaque;
+
+    s->pcycle_running = modectl_any_thread_running(
+        s->regs[HEX_SREG_MODECTL]);
+    if (s->pcycle_running) {
+        s->pcycle_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_hexagon_globalreg = {
     .name = "hexagon_globalreg",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_save = hexagon_globalreg_pre_save,
+    .post_load = hexagon_globalreg_post_load,
     .fields = (const VMStateField[]){
         VMSTATE_UINT32_ARRAY(regs, HexagonGlobalRegState, NUM_SREGS),
         VMSTATE_UINT64(g_pcycle_base, HexagonGlobalRegState),
@@ -275,6 +469,10 @@ static const VMStateDescription vmstate_hexagon_globalreg = {
 };
 
 static const Property hexagon_globalreg_properties[] = {
+    DEFINE_PROP_LINK("l2vic", HexagonGlobalRegState, l2vic,
+                     TYPE_HEX_L2VIC_INTERFACE, HexL2VicInterface *),
+    DEFINE_PROP_LINK("qtimer", HexagonGlobalRegState, qtimer,
+                     TYPE_QCT_QTIMER_INTERFACE, QctQtimerInterface *),
     DEFINE_PROP_UINT32("boot-evb", HexagonGlobalRegState, boot_evb, 0x0),
     DEFINE_PROP_UINT64("config-table-addr", HexagonGlobalRegState,
                        config_table_addr, 0xffffffffULL),
@@ -295,6 +493,7 @@ static void hexagon_globalreg_class_init(ObjectClass *klass, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = hexagon_globalreg_reset_hold;
+    dc->realize = hexagon_globalreg_realize;
     dc->vmsd = &vmstate_hexagon_globalreg;
     dc->user_creatable = false;
     device_class_set_props(dc, hexagon_globalreg_properties);

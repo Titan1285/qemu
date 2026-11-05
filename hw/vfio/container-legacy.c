@@ -847,13 +847,8 @@ static bool vfio_device_get(VFIOGroup *group, const char *name,
     g_autofree struct vfio_device_info *info = NULL;
     int fd;
 
-    fd = vfio_cpr_group_get_device_fd(group->fd, name);
+    fd = vfio_cpr_group_get_device_fd(group, name, errp);
     if (fd < 0) {
-        error_setg_errno(errp, errno, "error getting device from group %d",
-                         group->groupid);
-        error_append_hint(errp,
-                      "Verify all devices in group %d are bound to vfio-<bus> "
-                      "or pci-stub and not already in use\n", group->groupid);
         return false;
     }
 
@@ -1075,7 +1070,7 @@ static int vfio_legacy_pci_hot_reset(VFIODevice *vbasedev, bool single)
 
         /* Prep dependent devices for reset and clear our marker. */
         QLIST_FOREACH(vbasedev_iter, &group->device_list, next) {
-            if (!vbasedev_iter->dev->realized ||
+            if (!qdev_is_realized(vbasedev_iter->dev) ||
                 !vfio_pci_from_vfio_device(vbasedev_iter)) {
                 continue;
             }
@@ -1160,7 +1155,7 @@ out:
         }
 
         QLIST_FOREACH(vbasedev_iter, &group->device_list, next) {
-            if (!vbasedev_iter->dev->realized ||
+            if (!qdev_is_realized(vbasedev_iter->dev) ||
                 !vfio_pci_from_vfio_device(vbasedev_iter)) {
                 continue;
             }

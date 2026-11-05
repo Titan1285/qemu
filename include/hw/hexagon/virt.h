@@ -11,18 +11,14 @@
 #include "hw/hexagon/hexagon.h"
 #include "target/hexagon/cpu.h"
 
+#define VIRTIO_DEV_COUNT 8
+
 struct HexagonVirtMachineState {
     HexagonCommonMachineState parent_obj;
 
     int fdt_size;
-    MemoryRegion *sys;
     MemoryRegion tcm;
-    MemoryRegion vtcm;
-    MemoryRegion bios;
-    Clock *apb_clk;
 };
-
-void hexagon_load_fdt(const struct HexagonVirtMachineState *vms);
 
 #define TYPE_HEXAGON_VIRT_MACHINE MACHINE_TYPE_NAME("virt")
 OBJECT_DECLARE_SIMPLE_TYPE(HexagonVirtMachineState, HEXAGON_VIRT_MACHINE)

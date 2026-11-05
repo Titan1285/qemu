@@ -7,6 +7,7 @@ test_x86_64_timeouts = {
   'netdev_ethtool' : 180,
   'replay' : 480,
   'virtio_balloon': 120,
+  'vhost_vsock_cpr': 300,
 }
 
 tests_x86_64_system_quick = [
@@ -28,6 +29,10 @@ if not get_option('asan')
   tests_x86_64_system_quick += [ 'memlock' ]
 endif
 
+if igvm.found()
+  tests_x86_64_system_quick += [ 'vm_launch_update' ]
+endif
+
 tests_x86_64_system_thorough = [
   'acpi_bits',
   'hotplug_blk',
@@ -39,6 +44,7 @@ tests_x86_64_system_thorough = [
   'multiprocess',
   'netdev_ethtool',
   'nvme_migration',
+  'pcie_switch',
   'replay',
   'reverse_debug',
   'tuxrun',
@@ -47,4 +53,5 @@ tests_x86_64_system_thorough = [
   'virtio_balloon',
   'virtio_gpu',
   'rebuild_vmfd',
+  'vhost_vsock_cpr',
 ]

@@ -24,10 +24,6 @@
 #include "qobject/qlist.h"
 #include "qemu/log.h"
 
-#define AST2700_SOC_IO_SIZE          0x00FE0000
-#define AST2700_SOC_IOMEM_SIZE       0x01000000
-#define AST2700_SOC_DPMCU_SIZE       0x00040000
-
 static const hwaddr aspeed_soc_ast2700_memmap[] = {
     [ASPEED_DEV_VBOOTROM]  =  0x00000000,
     [ASPEED_DEV_IOMEM]     =  0x00020000,
@@ -263,6 +259,14 @@ static const struct gic_intc_irq_info ast2700_gic_intcmap[] = {
     {201, 3, 1, ast2700_gic201_intcmap},
 };
 
+static const UnimplementedDeviceConfig aspeed_soc_ast2700_unimp_devs[] = {
+    { "dpmcu", "aspeed.dpmcu", 0x11000000, 0x00040000, -1000 },
+    { "iomem", "aspeed.io", 0x00020000, 0x00FE0000, -1000 },
+    { "iomem0", "aspeed.iomem0", 0x12000000, 0x01000000, -1000 },
+    { "iomem1", "aspeed.iomem1", 0x14000000, 0x01000000, -1000 },
+    { }
+};
+
 static qemu_irq aspeed_soc_ast2700_get_irq(AspeedSoCState *s, int dev)
 {
     Aspeed27x0SoCState *a = ASPEED27X0_SOC(s);
@@ -435,12 +439,12 @@ static void aspeed_soc_ast2700_init(Object *obj)
 
     object_initialize_child(obj, "gic", &a->gic, gicv3_class_name());
 
-    object_initialize_child(obj, "scu", &s->scu, TYPE_ASPEED_2700_SCU);
-    qdev_prop_set_uint32(DEVICE(&s->scu), "silicon-rev",
+    object_initialize_child(obj, "scu", &a->scu, TYPE_ASPEED_2700_SCU);
+    qdev_prop_set_uint32(DEVICE(&a->scu), "silicon-rev",
                          sc->silicon_rev);
-    object_property_add_alias(obj, "hw-strap1", OBJECT(&s->scu),
+    object_property_add_alias(obj, "hw-strap1", OBJECT(&a->scu),
                               "hw-strap1");
-    object_property_add_alias(obj, "hw-prot-key", OBJECT(&s->scu),
+    object_property_add_alias(obj, "hw-prot-key", OBJECT(&a->scu),
                               "hw-prot-key");
 
     object_initialize_child(obj, "scuio", &s->scuio, TYPE_ASPEED_2700_SCUIO);
@@ -558,15 +562,6 @@ static void aspeed_soc_ast2700_init(Object *obj)
         qdev_prop_set_uint32(DEVICE(&s->ioexp[i]), "silicon-rev",
                              sc->silicon_rev);
     }
-
-    object_initialize_child(obj, "dpmcu", &s->dpmcu,
-                            TYPE_UNIMPLEMENTED_DEVICE);
-    object_initialize_child(obj, "iomem", &s->iomem,
-                            TYPE_UNIMPLEMENTED_DEVICE);
-    object_initialize_child(obj, "iomem0", &s->iomem0,
-                            TYPE_UNIMPLEMENTED_DEVICE);
-    object_initialize_child(obj, "iomem1", &s->iomem1,
-                            TYPE_UNIMPLEMENTED_DEVICE);
 }
 
 /*
@@ -808,10 +803,10 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
                                 sc->memmap[ASPEED_DEV_VBOOTROM], &s->vbootrom);
 
     /* SCU */
-    if (!sysbus_realize(SYS_BUS_DEVICE(&s->scu), errp)) {
+    if (!sysbus_realize(SYS_BUS_DEVICE(&a->scu), errp)) {
         return;
     }
-    aspeed_mmio_map(s->memory, SYS_BUS_DEVICE(&s->scu), 0,
+    aspeed_mmio_map(s->memory, SYS_BUS_DEVICE(&a->scu), 0,
                     sc->memmap[ASPEED_DEV_SCU]);
 
     /* SCU1 */
@@ -870,6 +865,11 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
 
     /* EHCI */
     for (i = 0; i < sc->ehcis_num; i++) {
+        object_property_set_int(OBJECT(&s->ehci[i]), "ctrldssegment-default",
+                                sc->memmap[ASPEED_DEV_SDRAM] >> 32,
+                                &error_abort);
+        object_property_set_bool(OBJECT(&s->ehci[i]), "caps-64bit-addr", true,
+                                 &error_abort);
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->ehci[i]), errp)) {
             return;
         }
@@ -929,7 +929,7 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
         AspeedWDTClass *awc = ASPEED_WDT_GET_CLASS(&s->wdt[i]);
         hwaddr wdt_offset = sc->memmap[ASPEED_DEV_WDT] + i * awc->iosize;
 
-        object_property_set_link(OBJECT(&s->wdt[i]), "scu", OBJECT(&s->scu),
+        object_property_set_link(OBJECT(&s->wdt[i]), "scu", OBJECT(&a->scu),
                                  &error_abort);
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->wdt[i]), errp)) {
             return;
@@ -1032,7 +1032,7 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
                        aspeed_soc_ast2700_get_irq(s, ASPEED_DEV_EMMC));
 
     /* Timer */
-    object_property_set_link(OBJECT(&s->timerctrl), "scu", OBJECT(&s->scu),
+    object_property_set_link(OBJECT(&s->timerctrl), "scu", OBJECT(&a->scu),
                              &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->timerctrl), errp)) {
         return;
@@ -1132,22 +1132,8 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    aspeed_mmio_map_unimplemented(s->memory, SYS_BUS_DEVICE(&s->dpmcu),
-                                  "aspeed.dpmcu",
-                                  sc->memmap[ASPEED_DEV_DPMCU],
-                                  AST2700_SOC_DPMCU_SIZE);
-    aspeed_mmio_map_unimplemented(s->memory, SYS_BUS_DEVICE(&s->iomem),
-                                  "aspeed.io",
-                                  sc->memmap[ASPEED_DEV_IOMEM],
-                                  AST2700_SOC_IO_SIZE);
-    aspeed_mmio_map_unimplemented(s->memory, SYS_BUS_DEVICE(&s->iomem0),
-                                  "aspeed.iomem0",
-                                  sc->memmap[ASPEED_DEV_IOMEM0],
-                                  AST2700_SOC_IOMEM_SIZE);
-    aspeed_mmio_map_unimplemented(s->memory, SYS_BUS_DEVICE(&s->iomem1),
-                                  "aspeed.iomem1",
-                                  sc->memmap[ASPEED_DEV_IOMEM1],
-                                  AST2700_SOC_IOMEM_SIZE);
+    /* Unimplemented devices */
+    create_unimplemented_devices(OBJECT(s), s->memory, sc->unimp_devs);
 }
 
 static void aspeed_soc_ast2700a1_class_init(ObjectClass *oc, const void *data)
@@ -1178,6 +1164,7 @@ static void aspeed_soc_ast2700a1_class_init(ObjectClass *oc, const void *data)
     sc->uarts_base   = ASPEED_DEV_UART0;
     sc->irqmap       = aspeed_soc_ast2700a1_irqmap;
     sc->memmap       = aspeed_soc_ast2700_memmap;
+    sc->unimp_devs   = aspeed_soc_ast2700_unimp_devs;
 }
 
 static void aspeed_soc_ast2700a2_class_init(ObjectClass *oc, const void *data)
@@ -1208,6 +1195,7 @@ static void aspeed_soc_ast2700a2_class_init(ObjectClass *oc, const void *data)
     sc->uarts_base   = ASPEED_DEV_UART0;
     sc->irqmap       = aspeed_soc_ast2700a1_irqmap;
     sc->memmap       = aspeed_soc_ast2700_memmap;
+    sc->unimp_devs   = aspeed_soc_ast2700_unimp_devs;
 }
 
 static const TypeInfo aspeed_soc_ast27x0_types[] = {

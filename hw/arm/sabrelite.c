@@ -14,10 +14,10 @@
 #include "qapi/error.h"
 #include "hw/arm/fsl-imx6.h"
 #include "hw/arm/boot.h"
-#include "hw/arm/machines-qom.h"
 #include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
 #include "qemu/error-report.h"
+#include "qemu/units.h"
 #include "system/qtest.h"
 
 struct SabreliteMachineState {
@@ -25,17 +25,11 @@ struct SabreliteMachineState {
 
     FslIMX6State soc;
     CanBusState *canbus[FSL_IMX6_NUM_CANS];
+    struct arm_boot_info bootinfo;
 };
 
 #define TYPE_SABRELITE_MACHINE MACHINE_TYPE_NAME("sabrelite")
 OBJECT_DECLARE_SIMPLE_TYPE(SabreliteMachineState, SABRELITE_MACHINE)
-
-static struct arm_boot_info sabrelite_binfo = {
-    /* DDR memory start */
-    .loader_start = FSL_IMX6_MMDC_ADDR,
-    /* No board ID, we boot from DT tree */
-    .board_id = -1,
-};
 
 /* No need to do any particular setup for secondary boot */
 static void sabrelite_write_secondary(ARMCPU *cpu,
@@ -72,7 +66,7 @@ static void sabrelite_init(MachineState *machine)
                                  OBJECT(s->canbus[i]), &error_fatal);
     }
 
-    qdev_realize(DEVICE(&s->soc), NULL, &error_fatal);
+    sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
 
     memory_region_add_subregion(get_system_memory(), FSL_IMX6_MMDC_ADDR,
                                 machine->ram);
@@ -110,13 +104,17 @@ static void sabrelite_init(MachineState *machine)
         }
     }
 
-    sabrelite_binfo.ram_size = machine->ram_size;
-    sabrelite_binfo.secure_boot = true;
-    sabrelite_binfo.write_secondary_boot = sabrelite_write_secondary;
-    sabrelite_binfo.secondary_cpu_reset_hook = sabrelite_reset_secondary;
+    /* DDR memory start */
+    s->bootinfo.loader_start = FSL_IMX6_MMDC_ADDR;
+    /* No board ID, we boot from DT tree */
+    s->bootinfo.board_id = -1;
+    s->bootinfo.ram_size = machine->ram_size;
+    s->bootinfo.secure_boot = true;
+    s->bootinfo.write_secondary_boot = sabrelite_write_secondary;
+    s->bootinfo.secondary_cpu_reset_hook = sabrelite_reset_secondary;
 
     if (!qtest_enabled()) {
-        arm_load_kernel(&s->soc.cpu[0], machine, &sabrelite_binfo);
+        arm_load_kernel(&s->soc.cpu[0], machine, &s->bootinfo);
     }
 }
 
@@ -142,7 +140,9 @@ static void sabrelite_machine_class_init(ObjectClass *oc, const void *data)
     mc->desc = "Freescale i.MX6 Quad SABRE Lite Board (Cortex-A9)";
     mc->init = sabrelite_init;
     mc->max_cpus = FSL_IMX6_NUM_CPUS;
+    mc->default_cpus = FSL_IMX6_NUM_CPUS;
     mc->ignore_memory_transaction_failures = true;
+    mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "sabrelite.ram";
     mc->auto_create_sdcard = true;
 }
@@ -154,7 +154,6 @@ static const TypeInfo sabrelite_machine_init_typeinfo = {
     .instance_init = sabrelite_machine_instance_init,
     .instance_size = sizeof(SabreliteMachineState),
     .abstract      = false,
-    .interfaces    = arm_machine_interfaces,
 };
 
 static void sabrelite_machine_init_register_types(void)

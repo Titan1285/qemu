@@ -59,13 +59,13 @@ void vfio_device_reset_handler(void *opaque)
 
     trace_vfio_device_reset_handler();
     QLIST_FOREACH(vbasedev, &vfio_device_list, global_next) {
-        if (vbasedev->dev->realized) {
+        if (qdev_is_realized(vbasedev->dev)) {
             vbasedev->ops->vfio_compute_needs_reset(vbasedev);
         }
     }
 
     QLIST_FOREACH(vbasedev, &vfio_device_list, global_next) {
-        if (vbasedev->dev->realized && vbasedev->needs_reset) {
+        if (qdev_is_realized(vbasedev->dev) && vbasedev->needs_reset) {
             vbasedev->ops->vfio_hot_reset_multi(vbasedev);
         }
     }
@@ -662,6 +662,7 @@ static VFIODeviceIOOps vfio_device_io_ops_ioctl = {
 
     .device_feature = vfio_device_io_device_feature,
     .get_region_info = vfio_device_io_get_region_info,
+    .setup_sparse_mmaps = vfio_region_setup_sparse_mmaps,
     .get_irq_info = vfio_device_io_get_irq_info,
     .set_irqs = vfio_device_io_set_irqs,
     .region_read = vfio_device_io_region_read,

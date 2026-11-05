@@ -21,6 +21,14 @@
 #include "qemu/bitops.h"
 #include "cpu-qom.h"
 
+typedef struct HexagonCPUConfig {
+    bool lldb_compat;
+    uint32_t lldb_stack_adjust;
+    bool short_circuit;
+    bool ieee_fp_extension;
+    const HexagonCPUDef *hex_def;
+} HexagonCPUConfig;
+
 #define PCALIGN 4
 #define PCALIGN_MASK (PCALIGN - 1)
 
@@ -33,6 +41,7 @@ enum hex_event {
     HEX_EVENT_TLB_MISS_RW = 0x6,
     HEX_EVENT_TRAP0 = 0x8,
     HEX_EVENT_TRAP1 = 0x9,
+    HEX_EVENT_TRAP2 = 0xa,
     HEX_EVENT_FPTRAP = 0xb,
     HEX_EVENT_DEBUG = 0xc,
     HEX_EVENT_INT0 = 0x10,
@@ -53,6 +62,8 @@ enum hex_event {
     HEX_EVENT_INTF = 0x1f,
 };
 
+const char *hexagon_event_name(int event);
+
 enum hex_cause {
     HEX_CAUSE_NONE = -1,
     HEX_CAUSE_RESET = 0x000,
@@ -63,12 +74,15 @@ enum hex_cause {
     HEX_CAUSE_TRAP1 = 0x009,
     HEX_CAUSE_FETCH_NO_XPAGE = 0x011,
     HEX_CAUSE_FETCH_NO_UPAGE = 0x012,
+    HEX_CAUSE_CFI_VIOLATION = 0x014,
     HEX_CAUSE_INVALID_PACKET = 0x015,
     HEX_CAUSE_INVALID_OPCODE = 0x015, /* alias: same cause as INVALID_PACKET */
     HEX_CAUSE_NO_COPROC_ENABLE = 0x016,
     HEX_CAUSE_NO_COPROC2_ENABLE = 0x018,
+    HEX_CAUSE_NO_COPROC3_ENABLE = 0x019,
     HEX_CAUSE_PRIV_USER_NO_GINSN = 0x01a,
     HEX_CAUSE_PRIV_USER_NO_SINSN = 0x01b,
+    HEX_CAUSE_VECTOR_STACK_OVERFLOW = 0x01c,
     HEX_CAUSE_REG_WRITE_CONFLICT = 0x01d,
     HEX_CAUSE_PC_NOT_ALIGNED = 0x01e,
     HEX_CAUSE_MISALIGNED_LOAD = 0x020,
@@ -123,7 +137,7 @@ static inline bool is_packet_end(uint32_t endocing)
     return ((bits == 0x3) || (bits == 0x0));
 }
 
-int disassemble_hexagon(uint32_t *words, int nwords, bfd_vma pc, GString *buf,
-                        const HexagonCPUDef *hex_def);
+int disassemble_hexagon(uint32_t *words, int nwords, bfd_vma pc,
+                        GString *buf, const HexagonCPUConfig *cfg);
 
 #endif

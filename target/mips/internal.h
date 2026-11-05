@@ -115,10 +115,11 @@ enum {
     TLBRET_MATCH = 0
 };
 
-int get_physical_address(CPUMIPSState *env, hwaddr *physical,
+int get_physical_address(const CPUMIPSState *env, hwaddr *physical,
                          int *prot, target_ulong real_address,
                          MMUAccessType access_type, int mmu_idx);
-hwaddr mips_cpu_get_phys_addr_debug(CPUState *cpu, vaddr addr);
+bool mips_cpu_translate_for_debug(CPUState *cpu, vaddr addr,
+                                  TranslateForDebugResult *result);
 
 typedef struct r4k_tlb_t r4k_tlb_t;
 struct r4k_tlb_t {
@@ -144,7 +145,7 @@ struct r4k_tlb_t {
 struct CPUMIPSTLBContext {
     uint32_t nb_tlb;
     uint32_t tlb_in_use;
-    int (*map_address)(CPUMIPSState *env, hwaddr *physical, int *prot,
+    int (*map_address)(const CPUMIPSState *env, hwaddr *physical, int *prot,
                        target_ulong address, MMUAccessType access_type);
     void (*helper_tlbwi)(CPUMIPSState *env);
     void (*helper_tlbwr)(CPUMIPSState *env);
@@ -159,13 +160,13 @@ struct CPUMIPSTLBContext {
     } mmu;
 };
 
-void sync_c0_status(CPUMIPSState *env, CPUMIPSState *cpu, int tc);
+void sync_c0_status(const CPUMIPSState *env, CPUMIPSState *cpu, int tc);
 void cpu_mips_store_status(CPUMIPSState *env, target_ulong val);
 void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val);
 
 extern const VMStateDescription vmstate_mips_cpu;
 
-static inline bool cpu_mips_hw_interrupts_enabled(CPUMIPSState *env)
+static inline bool cpu_mips_hw_interrupts_enabled(const CPUMIPSState *env)
 {
     return (env->CP0_Status & (1 << CP0St_IE)) &&
         !(env->CP0_Status & (1 << CP0St_EXL)) &&
@@ -180,7 +181,7 @@ static inline bool cpu_mips_hw_interrupts_enabled(CPUMIPSState *env)
 }
 
 /* Check if there is pending and not masked out interrupt */
-static inline bool cpu_mips_hw_interrupts_pending(CPUMIPSState *env)
+static inline bool cpu_mips_hw_interrupts_pending(const CPUMIPSState *env)
 {
     int32_t pending;
     int32_t status;
@@ -228,12 +229,17 @@ static inline void mips_env_set_pc(CPUMIPSState *env, target_ulong value)
     }
 }
 
-static inline bool mips_env_is_bigendian(CPUMIPSState *env)
+static inline bool mips_env_is_64bit(const CPUMIPSState *env)
+{
+    return env->cpu_model->insn_flags & CPU_MIPS64;
+}
+
+static inline bool mips_env_is_bigendian(const CPUMIPSState *env)
 {
     return extract32(env->CP0_Config0, CP0C0_BE, 1);
 }
 
-static inline MemOp mo_endian_env(CPUMIPSState *env)
+static inline MemOp mo_endian_env(const CPUMIPSState *env)
 {
     return mips_env_is_bigendian(env) ? MO_BE : MO_LE;
 }
@@ -247,9 +253,9 @@ static inline void restore_pamask(CPUMIPSState *env)
     }
 }
 
-static inline int mips_vpe_active(CPUMIPSState *env)
+static inline int mips_vpe_active(const CPUMIPSState *env)
 {
-    MIPSCPU *cpu = env_archcpu(env);
+    const MIPSCPU *cpu = env_archcpu(env);
     int active = 1;
 
     /* Check that the VPE is enabled.  */
@@ -281,7 +287,7 @@ static inline int mips_vpe_active(CPUMIPSState *env)
     return active;
 }
 
-static inline int mips_vp_active(CPUMIPSState *env)
+static inline int mips_vp_active(const CPUMIPSState *env)
 {
     CPUState *cs;
 

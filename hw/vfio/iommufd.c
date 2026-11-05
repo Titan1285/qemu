@@ -155,6 +155,7 @@ static void iommufd_cdev_kvm_device_del(VFIODevice *vbasedev)
 
 static bool iommufd_cdev_connect_and_bind(VFIODevice *vbasedev, Error **errp)
 {
+    VFIOPCIDevice *vdev = vfio_pci_from_vfio_device(vbasedev);
     IOMMUFDBackend *iommufd = vbasedev->iommufd;
     struct vfio_device_bind_iommufd bind = {
         .argsz = sizeof(bind),
@@ -180,6 +181,15 @@ static bool iommufd_cdev_connect_and_bind(VFIODevice *vbasedev, Error **errp)
 
     /* Bind device to iommufd */
     bind.iommufd = iommufd->fd;
+
+    /*
+     * Pass the VF token when binding a PCI device.
+     */
+    if (vdev && !qemu_uuid_is_null(&vdev->vf_token)) {
+        bind.flags |= VFIO_DEVICE_BIND_FLAG_TOKEN;
+        bind.token_uuid_ptr = (uintptr_t)&vdev->vf_token;
+    }
+
     if (ioctl(vbasedev->fd, VFIO_DEVICE_BIND_IOMMUFD, &bind)) {
         error_setg_errno(errp, errno, "error bind device fd=%d to iommufd=%d",
                          vbasedev->fd, bind.iommufd);
@@ -476,7 +486,7 @@ static bool iommufd_cdev_autodomains_get(VFIODevice *vbasedev,
     if (!iommufd_backend_alloc_hwpt(iommufd, vbasedev->devid,
                                     container->ioas_id, flags,
                                     IOMMU_HWPT_DATA_NONE, 0, NULL,
-                                    &hwpt_id, errp)) {
+                                    0, &hwpt_id, errp)) {
         return false;
     }
 
@@ -829,7 +839,7 @@ iommufd_cdev_dep_get_realized_vpdev(struct vfio_pci_dependent_device *dep_dev,
 
     vbasedev_tmp = iommufd_cdev_pci_find_by_devid(dep_dev->devid);
     if (!vfio_pci_from_vfio_device(vbasedev_tmp) ||
-        !vbasedev_tmp->dev->realized) {
+        !qdev_is_realized(vbasedev_tmp->dev)) {
         return NULL;
     }
 

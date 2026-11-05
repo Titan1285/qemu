@@ -23,12 +23,14 @@
  */
 
 #include "qemu/osdep.h"
-
+#include "qemu/aio-wait.h"
+#include "qemu/lockable.h"
 #include "chardev/char-io.h"
 #include "monitor-internal.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-control.h"
 #include "qapi/qapi-commands-char.h"
+#include "qapi/qapi-type-infos-qom.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
@@ -134,7 +136,7 @@ static void monitor_qmp_class_init(ObjectClass *cls, const void *data)
                                    monitor_qmp_set_pretty);
     object_class_property_add_enum(cls, "close-action",
                                    "MonitorQMPCloseAction",
-                                   &MonitorQMPCloseAction_lookup,
+                                   &MonitorQMPCloseAction_type_info,
                                    monitor_qmp_get_close_action,
                                    monitor_qmp_set_close_action);
 
@@ -662,6 +664,7 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
     case CHR_EVENT_BREAK:
     case CHR_EVENT_MUX_IN:
     case CHR_EVENT_MUX_OUT:
+    case CHR_EVENT_RESIZE:
         /* Ignore */
         break;
     }

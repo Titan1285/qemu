@@ -52,28 +52,6 @@
 #define CCR_FIELD_SET(ENV, FIELD) \
     (!!GET_FIELD(FIELD, (ENV)->t_sreg[HEX_SREG_CCR]))
 
-/*
- * Direct-to-guest is not implemented yet, continuing would cause unexpected
- * behavior, so we abort.
- */
-#define ASSERT_DIRECT_TO_GUEST_UNSET(ENV, EXCP) \
-    do { \
-        switch (EXCP) { \
-        case HEX_EVENT_TRAP0: \
-            g_assert(!CCR_FIELD_SET(ENV, CCR_GTE)); \
-            break; \
-        case HEX_EVENT_IMPRECISE: \
-        case HEX_EVENT_PRECISE: \
-        case HEX_EVENT_FPTRAP: \
-            g_assert(!CCR_FIELD_SET(ENV, CCR_GEE)); \
-            break; \
-        default: \
-            if ((EXCP) >= HEX_EVENT_INT0) { \
-                g_assert(!CCR_FIELD_SET(ENV, CCR_GIE)); \
-            } \
-            break; \
-        } \
-    } while (0)
 #endif
 
 #define fREAD_ELR() (env->t_sreg[HEX_SREG_ELR])
@@ -101,15 +79,36 @@
 #define fFRAMECHECK(ADDR, EA) gen_framecheck(ctx, ADDR, EA)
 #endif
 
-#define fVIRTINSN_SPSWAP(IMM, REG)
-#define fVIRTINSN_GETIE(IMM, REG) { REG = 0xdeafbeef; }
-#define fVIRTINSN_SETIE(IMM, REG)
-#define fVIRTINSN_RTE(IMM, REG)
+#define fVIRTINSN_SPSWAP(IMM, REG) \
+    do { \
+        if (GET_FIELD(GSR_UM, env->greg[HEX_GREG_GSR])) { \
+            uint32_t tmp = (REG); \
+            (REG) = env->greg[HEX_GREG_GOSP]; \
+            env->greg[HEX_GREG_GOSP] = tmp; \
+        } \
+        env->gpr[HEX_REG_PC] = next_PC; \
+    } while (0)
+#define fVIRTINSN_GETIE(IMM, REG) \
+    do { \
+        (REG) = CCR_FIELD_SET(env, CCR_GIE); \
+        env->gpr[HEX_REG_PC] = next_PC; \
+    } while (0)
+#define fVIRTINSN_SETIE(IMM, REG) \
+    do { \
+        uint32_t old_gie = CCR_FIELD_SET(env, CCR_GIE); \
+        uint32_t new_gie = (REG) & 1; \
+        SET_SYSTEM_FIELD(env, HEX_SREG_CCR, CCR_GIE, new_gie); \
+        (REG) = old_gie; \
+        env->gpr[HEX_REG_PC] = next_PC; \
+    } while (0)
+#define fVIRTINSN_RTE(IMM, REG) hexagon_vmrte(env)
 #define fGRE_ENABLED() \
     GET_FIELD(CCR_GRE, env->t_sreg[HEX_SREG_CCR])
+/* Virtual instructions execute only in guest mode. */
 #define fTRAP1_VIRTINSN(IMM) \
-    (fGRE_ENABLED() && \
-        (((IMM) == 1) || ((IMM) == 3) || ((IMM) == 4) || ((IMM) == 6)))
+    (get_cpu_mode(env) == HEX_CPU_MODE_GUEST && fGRE_ENABLED() && \
+        (((IMM) == 1) || ((IMM) == 3) || ((IMM) == 4) || \
+         ((IMM) == 6)))
 
 /* Not modeled in qemu */
 
@@ -145,10 +144,10 @@
 #define fDCINVIDX(REG)
 #define fDCINVA(REG) do { REG = REG; } while (0) /* Nothing to do in qemu */
 
-#define fSET_TLB_LOCK()       hex_tlb_lock(env);
+#define fSET_TLB_LOCK()       hex_tlb_lock(env, PC);
 #define fCLEAR_TLB_LOCK()     hex_tlb_unlock(env);
 
-#define fSET_K0_LOCK()        hex_k0_lock(env);
+#define fSET_K0_LOCK()        hex_k0_lock(env, PC);
 #define fCLEAR_K0_LOCK()      hex_k0_unlock(env);
 
 #define fTLB_IDXMASK(INDEX) \
@@ -177,14 +176,21 @@
                      fTLB_NONPOW2WRAP(fTLB_IDXMASK(INDEX)))
 #define fTLBP(TLBHI) \
     hex_tlb_lookup(env, ((TLBHI) >> 12), ((TLBHI) << 12))
+#define fTLBPP(TLBHI) ({ \
+    qemu_log_mask(LOG_UNIMP, "tlbpp is not implemented\n"); \
+    0; })
 #define iic_flush_cache(p)
 
 #define fIN_DEBUG_MODE(TNUM) ({ \
     HexagonCPU *_cpu = env_archcpu(env); \
+    bool _is_v81 = _cpu->cfg.hex_def->hex_version >= HEX_VER_V81; \
     uint32_t _isdbst = _cpu->globalregs ? \
         hexagon_globalreg_read(_cpu->globalregs, \
-                               HEX_SREG_ISDBST, env->threadId) : 0; \
-    (GET_FIELD(ISDBST_DEBUGMODE, _isdbst) \
+                                _is_v81 ? HEX_SREG_ISDBST2 : HEX_SREG_ISDBST, \
+                                env->threadId) : 0; \
+    ((_is_v81 ? \
+      GET_FIELD(ISDBST2_DEBUGMODE, _isdbst) : \
+      GET_FIELD(ISDBST_DEBUGMODE, _isdbst)) \
         & (0x1 << (TNUM))) != 0; })
 
 #define fIN_DEBUG_MODE_NO_ISDB(TNUM) false
@@ -240,13 +246,10 @@
     } while (0)
 #endif
 
-#else
-#define ASSERT_DIRECT_TO_GUEST_UNSET(ENV, EXCP) do { } while (0)
 #endif
 
 #define NUM_TLB_REGS(x) (hexagon_tlb_get_num_entries(env_archcpu(env)->tlb))
 
-/* NMI routing not yet implemented; Y4_nmi is a no-op for now */
-#define fDO_NMI(THREAD_MASK) do { } while (0)
+#define fDO_NMI(THREAD_MASK) hexagon_nmi(env, THREAD_MASK)
 
 #endif
